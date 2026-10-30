@@ -458,6 +458,77 @@ async def gsax_gardiens(min_pj: int = 3, limite: int = 15, situation: str = "all
     return out[:limite]
 
 
+# ---------- Blessés (MoneyPuck) ----------
+
+MP_BLESSES = "https://moneypuck.com/moneypuck/playerData/playerNews"
+BLESSES_TTL = 1800  # 30 min
+STATUTS_BLESSURE = {
+    "DTD": "Jour à jour",
+    "O": "Out",
+    "IR": "Réserve des blessés",
+    "IR-LT": "Réserve longue durée",
+    "IR-NR": "Réserve (hors alignement)",
+}
+
+
+def _entier(v) -> int | None:
+    """'2.0' -> 2 ; vide ou -999 (inconnu chez MoneyPuck) -> None."""
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if n <= -999 else int(n)
+
+
+async def _blesses_mp() -> tuple[list[dict], str | None]:
+    url = f"{MP_BLESSES}/current_injuries.csv"
+    hit = _cache.get(url)
+    if hit and time.time() - hit[0] < BLESSES_TTL:
+        return hit[1]
+    r = await _client.get(url, follow_redirects=True)
+    r.raise_for_status()
+    rows = []
+    for row in csv.DictReader(io.StringIO(r.text)):
+        retour = row.get("dateOfReturn") or None
+        if retour and retour.startswith("2099"):
+            retour = None  # date de retour inconnue
+        statut = row.get("playerInjuryStatus") or ""
+        rows.append({
+            "joueur": row.get("playerName"),
+            "equipe": row.get("teamCode"),
+            "pos": row.get("position"),
+            "blessure": row.get("yahooInjuryDescription") or "Non précisé",
+            "statut": statut,
+            "statut_fr": STATUTS_BLESSURE.get(statut, statut),
+            "retour_prevu": retour,
+            "matchs_a_manquer": _entier(row.get("gamesStillToMiss")),
+            "matchs_manques": _entier(row.get("gamesMissedSoFar")),
+            "dernier_match": row.get("lastGameDate") or None,
+        })
+    try:
+        m = await _client.get(f"{MP_BLESSES}/injury_update_time.txt", follow_redirects=True)
+        maj = m.text.strip() if m.status_code == 200 else None
+    except httpx.HTTPError:
+        maj = None
+    _cache[url] = (time.time(), (rows, maj))
+    return rows, maj
+
+
+@mcp.tool
+async def blesses(equipe: str | None = None, statut: str | None = None) -> dict:
+    """Joueurs blessés LNH (MoneyPuck) : blessure, statut (DTD, O, IR, IR-LT, IR-NR),
+    retour prévu et matchs encore à manquer.
+    equipe : abréviation (MTL, TOR...) ; sans équipe = toute la ligue.
+    statut : filtre optionnel (ex. DTD = incertains pour le prochain match)."""
+    rows, maj = await _blesses_mp()
+    if equipe:
+        rows = [r for r in rows if r["equipe"] == equipe.upper()]
+    if statut:
+        rows = [r for r in rows if r["statut"] == statut.upper()]
+    rows = sorted(rows, key=lambda r: (r["equipe"] or "", r["retour_prevu"] or "9999"))
+    return {"mise_a_jour": maj, "nb": len(rows), "blesses": rows}
+
+
 # ---------- Démarrage ----------
 
 if __name__ == "__main__":
