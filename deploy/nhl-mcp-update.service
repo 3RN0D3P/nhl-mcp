@@ -3,4 +3,4 @@ Description=Mise a jour NHL MCP depuis GitHub
 
 [Service]
 Type=oneshot
-ExecStart=/opt/nhl-mcp/deploy/update.sh
+ExecStart=/bin/bash /opt/nhl-mcp/deploy/update.sh

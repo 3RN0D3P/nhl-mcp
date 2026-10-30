@@ -4,6 +4,8 @@ Description=Verifie les mises a jour NHL MCP toutes les 5 minutes
 [Timer]
 OnBootSec=2min
 OnUnitActiveSec=5min
+OnCalendar=*:0/5
+Persistent=true
 
 [Install]
 WantedBy=timers.target
