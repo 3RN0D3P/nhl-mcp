@@ -211,10 +211,12 @@ async def boxscore(game_id: int) -> dict:
             "arrets": g.get("saves"),
             "buts_alloues": g.get("goalsAgainst"),
             "sv_pct": g.get("savePctg"),
+            # Format "arrêts/tirs". L'API LNH nomme la situation du point de vue de l'adversaire :
+            # powerPlay = l'adversaire est en avantage (son équipe est en désavantage).
             "arrets_par_situation": {
                 "egalite": g.get("evenStrengthShotsAgainst"),
-                "desavantage": g.get("shorthandedShotsAgainst"),
-                "avantage": g.get("powerPlayShotsAgainst"),
+                "equipe_en_desavantage": g.get("powerPlayShotsAgainst"),
+                "equipe_en_avantage": g.get("shorthandedShotsAgainst"),
             },
             "decision": g.get("decision"),
         } for g in t.get("goalies", []) if g.get("toi") not in (None, "00:00")]
