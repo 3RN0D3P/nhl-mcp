@@ -22,6 +22,7 @@ API = "https://api-web.nhle.com/v1"
 SEARCH = "https://search.d3.nhle.com/api/v1/search/player"
 TZ = ZoneInfo("America/Toronto")
 CACHE_TTL = 30  # secondes (évite de marteler l'API pendant un match)
+STATS = "https://api.nhle.com/stats/rest/en"  # API stats LNH (rapports par équipe)
 MONEYPUCK = "https://moneypuck.com/moneypuck/playerData/seasonSummary"
 MP_TTL = 3600  # MoneyPuck se met à jour une fois par jour : cache d'une heure
 
@@ -287,6 +288,75 @@ async def meneurs(categorie: str = "goals", limite: int = 10) -> list[dict]:
         "equipe": p.get("teamAbbrev"),
         "valeur": p.get("value"),
     } for p in d.get(categorie, [])]
+
+
+# ---------- Unités spéciales ----------
+
+def _saison_lnh() -> str:
+    a = _saison_mp(None)
+    return f"{a}{a + 1}"
+
+
+def _rang(rows: list[dict], cle: str, team_id, plus_haut_meilleur=True) -> int | None:
+    tri = sorted(rows, key=lambda r: r.get(cle) or 0, reverse=plus_haut_meilleur)
+    for i, r in enumerate(tri, 1):
+        if r.get("teamId") == team_id:
+            return i
+    return None
+
+
+@mcp.tool
+async def unites_speciales(equipe: str) -> dict:
+    """Avantage numérique (AN) et désavantage numérique (DN) d'une équipe pour la saison :
+    format buts/occasions, pourcentage et rang LNH, plus le dernier match joué."""
+    equipe = equipe.upper()
+    expr = f"seasonId={_saison_lnh()} and gameTypeId=2"
+    equipes = (await _get(f"{STATS}/team")).get("data", [])
+    team = next((t for t in equipes if t.get("triCode") == equipe), None)
+    if not team:
+        raise ValueError(f"Équipe inconnue : {equipe}")
+    tid = team["id"]
+
+    pp = (await _get(f"{STATS}/team/powerplay", {"cayenneExp": expr, "limit": 50})).get("data", [])
+    pk = (await _get(f"{STATS}/team/penaltykill", {"cayenneExp": expr, "limit": 50})).get("data", [])
+    a = next((r for r in pp if r.get("teamId") == tid), {})
+    d = next((r for r in pk if r.get("teamId") == tid), {})
+
+    out = {
+        "equipe": equipe,
+        "avantage_numerique": {
+            "format": f'{a.get("powerPlayGoalsFor", 0)}/{a.get("ppOpportunities", 0)}',
+            "pct": round((a.get("powerPlayPct") or 0) * 100, 1),
+            "rang": _rang(pp, "powerPlayPct", tid),
+        },
+        "desavantage_numerique": {
+            "format": f'{d.get("timesShorthanded", 0) - d.get("ppGoalsAgainst", 0)}/{d.get("timesShorthanded", 0)}',
+            "buts_alloues": d.get("ppGoalsAgainst"),
+            "pct": round((d.get("penaltyKillPct") or 0) * 100, 1),
+            "rang": _rang(pk, "penaltyKillPct", tid),
+        },
+    }
+
+    # Dernier match terminé : AN de chaque équipe (format "1/3")
+    try:
+        cal = await _get(f"{API}/club-schedule-season/{equipe}/now")
+        fini = [g for g in cal.get("games", []) if g.get("gameState") in ("OFF", "FINAL")]
+        if fini:
+            g = fini[-1]
+            rr = await _get(f"{API}/gamecenter/{g['id']}/right-rail")
+            stats = {s.get("category"): s for s in rr.get("teamGameStats", [])}
+            an = stats.get("powerPlay", {})
+            dom = g["homeTeam"]["abbrev"] == equipe
+            adv = g["awayTeam"]["abbrev"] if dom else g["homeTeam"]["abbrev"]
+            out["dernier_match"] = {
+                "date": g.get("gameDate"),
+                "adversaire": adv,
+                "an": an.get("homeValue" if dom else "awayValue"),
+                "an_adversaire": an.get("awayValue" if dom else "homeValue"),
+            }
+    except Exception as e:  # le dernier match est un bonus, pas bloquant
+        out["dernier_match"] = f"indisponible ({e.__class__.__name__})"
+    return out
 
 
 # ---------- Expected goals (MoneyPuck) ----------
