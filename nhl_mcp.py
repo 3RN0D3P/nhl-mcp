@@ -372,7 +372,8 @@ async def calendrier_equipe(equipe: str) -> list[dict]:
 async def face_a_face(equipe: str, adversaire: str) -> dict:
     """À UTILISER dès que la question mentionne deux équipes : « X a-t-il déjà joué /
     affronté Y cette année ? », fiche contre Y, prochain match contre Y. Couvre toute
-    la saison : matchs joués (score, gagnant), fiche victoires-défaites, matchs à venir. equipe/adversaire : abréviation (MTL, PIT...) ou nom
+    la saison : matchs joués (score, gagnant), fiche victoires-défaites, matchs à venir.
+    Le champ « reponse » contient la réponse prête à dire. equipe/adversaire : abréviation (MTL, PIT...) ou nom
     (Canadiens, CH, Penguins, Pingouins, Leafs...)."""
     eq, adv = _equipe(equipe), _equipe(adversaire)
     cal = await _get(f"{API}/club-schedule-season/{eq}/now")
@@ -408,7 +409,22 @@ async def face_a_face(equipe: str, adversaire: str) -> dict:
             if debut:
                 debut = datetime.fromisoformat(debut.replace("Z", "+00:00")).astimezone(TZ).strftime("%Y-%m-%d %H:%M")
             a_venir.append({"date_heure_est": debut or g.get("gameDate"), "match": lieu})
+    # Phrase prête à lire : les petits modèles (4B) contredisaient parfois le booléen.
+    if joues:
+        res = []
+        for j in joues:
+            jour = datetime.strptime(j["date"], "%Y-%m-%d").strftime("%d/%m")
+            issue = "victoire" if j["gagnant"] == eq else "défaite"
+            fin = f' en {j["fin"]}' if j["fin"] != "temps réglementaire" else ""
+            res.append(f'{issue} {j["score"]}{fin} le {jour}')
+        phrase = (f"Oui, {eq} a déjà affronté {adv} {len(joues)} fois cette saison : "
+                  + " ; ".join(res) + ".")
+    else:
+        phrase = f"Non, {eq} n'a pas encore affronté {adv} cette saison."
+    if a_venir:
+        phrase += f' Prochain match : {a_venir[0]["date_heure_est"]}, {a_venir[0]["match"]}.'
     return {
+        "reponse": phrase,
         "equipe": eq,
         "adversaire": adv,
         "deja_affronte_cette_saison": bool(joues),
