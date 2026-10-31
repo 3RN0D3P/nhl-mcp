@@ -351,8 +351,9 @@ async def classement(division: str | None = None) -> list[dict]:
 
 @mcp.tool
 async def calendrier_equipe(equipe: str) -> list[dict]:
-    """Matchs de la semaine pour une équipe. equipe : abréviation (MTL, TOR...) ou nom
-    (Canadiens, CH, Habs, Leafs...)."""
+    """Matchs de CETTE SEMAINE seulement pour une équipe. Ne couvre pas le reste de la
+    saison : pour savoir si deux équipes se sont déjà affrontées, utilise face_a_face.
+    equipe : abréviation (MTL, TOR...) ou nom (Canadiens, CH, Habs, Leafs...)."""
     d = await _get(f"{API}/club-schedule/{_equipe(equipe)}/week/now")
     return [{
         "game_id": g.get("id"),
@@ -364,9 +365,9 @@ async def calendrier_equipe(equipe: str) -> list[dict]:
 
 @mcp.tool
 async def face_a_face(equipe: str, adversaire: str) -> dict:
-    """Confrontations entre deux équipes cette saison (« le CH a-t-il déjà affronté
-    les Penguins ? ») : matchs joués avec score et gagnant, fiche victoires-défaites,
-    et matchs à venir. equipe/adversaire : abréviation (MTL, PIT...) ou nom
+    """À UTILISER dès que la question mentionne deux équipes : « X a-t-il déjà joué /
+    affronté Y cette année ? », fiche contre Y, prochain match contre Y. Couvre toute
+    la saison : matchs joués (score, gagnant), fiche victoires-défaites, matchs à venir. equipe/adversaire : abréviation (MTL, PIT...) ou nom
     (Canadiens, CH, Penguins, Pingouins, Leafs...)."""
     eq, adv = _equipe(equipe), _equipe(adversaire)
     cal = await _get(f"{API}/club-schedule-season/{eq}/now")
@@ -378,7 +379,7 @@ async def face_a_face(equipe: str, adversaire: str) -> dict:
         dom, ext = g["homeTeam"], g["awayTeam"]
         if adv not in (dom.get("abbrev"), ext.get("abbrev")):
             continue
-        lieu = f'{ext.get("abbrev")} @ {dom.get("abbrev")}'
+        lieu = f'{ext.get("abbrev")} @ {dom.get("abbrev")} ({dom.get("abbrev")} à domicile)'
         if g.get("gameState") in ("OFF", "FINAL"):
             nous = dom if dom.get("abbrev") == eq else ext
             eux = ext if nous is dom else dom
