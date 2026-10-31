@@ -109,24 +109,38 @@ async def _chercher(q: str) -> list:
     return res or await _get(SEARCH, {"culture": "en-us", "limit": 10, "q": q})
 
 
+def _ressemblance(nom: str, candidat: str) -> float:
+    """Ressemblance 0-1 entre le nom demandé et un nom de joueur (nom de famille seul si un seul mot)."""
+    from difflib import SequenceMatcher
+    q, c = _norm(nom), _norm(candidat)
+    if " " not in q.strip():
+        c = c.split(" ")[-1]
+    return SequenceMatcher(None, q, c).ratio()
+
+
 async def _chercher_nom(nom: str) -> list:
-    """Recherche tolérante aux fautes : un nom dicté ou tapé vite (« slafkovski », « draisaitel »)
-    est réessayé sans accents, avec y/i interchangés, puis en raccourcissant la fin du mot."""
-    essais = [nom, _norm(nom)]
+    """Recherche tolérante aux fautes : un nom dicté ou tapé vite (« slafkovski », « Cole Caulfield »)
+    est réessayé sans accents, avec y/i interchangés, avec une lettre en moins, puis en raccourcissant
+    la fin du mot. Les candidats sont classés par ressemblance avec le nom demandé : l'API LNH renvoie
+    parfois n'importe quel « Cole » pour un nom de famille mal orthographié."""
     dernier = _norm(nom).split(" ")[-1]
+    essais = [nom, _norm(nom), dernier]
     if dernier.endswith("i"):
         essais.append(dernier[:-1] + "y")
     if dernier.endswith("y"):
         essais.append(dernier[:-1] + "i")
-    essais += [dernier[:n] for n in range(len(dernier) - 1, 4, -1)]
-    vus = set()
+    essais += [dernier[:i] + dernier[i + 1:] for i in range(len(dernier))]   # une lettre en trop
+    essais += [dernier[:n] for n in range(len(dernier) - 1, 3, -1)]           # fin du mot mal entendue
+    vus, candidats = set(), {}
     for q in essais:
-        if q and q not in vus:
-            vus.add(q)
-            res = await _chercher(q)
-            if res:
-                return res
-    return []
+        if not q or q in vus or len(q) < 4:
+            continue
+        vus.add(q)
+        for r in await _chercher(q) or []:
+            candidats.setdefault(r.get("playerId"), r)
+        if candidats and max(_ressemblance(nom, r.get("name", "")) for r in candidats.values()) >= 0.85:
+            break
+    return sorted(candidats.values(), key=lambda r: _ressemblance(nom, r.get("name", "")), reverse=True)
 
 
 async def _trouver_joueur(nom: str) -> dict:
