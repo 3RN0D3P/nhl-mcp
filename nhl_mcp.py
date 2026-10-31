@@ -363,6 +363,56 @@ async def calendrier_equipe(equipe: str) -> list[dict]:
 
 
 @mcp.tool
+async def face_a_face(equipe: str, adversaire: str) -> dict:
+    """Confrontations entre deux équipes cette saison (« le CH a-t-il déjà affronté
+    les Penguins ? ») : matchs joués avec score et gagnant, fiche victoires-défaites,
+    et matchs à venir. equipe/adversaire : abréviation (MTL, PIT...) ou nom
+    (Canadiens, CH, Penguins, Pingouins, Leafs...)."""
+    eq, adv = _equipe(equipe), _equipe(adversaire)
+    cal = await _get(f"{API}/club-schedule-season/{eq}/now")
+    joues, a_venir = [], []
+    v = d = dp = 0
+    for g in cal.get("games", []):
+        if g.get("gameType") != 2:  # saison régulière seulement
+            continue
+        dom, ext = g["homeTeam"], g["awayTeam"]
+        if adv not in (dom.get("abbrev"), ext.get("abbrev")):
+            continue
+        lieu = f'{ext.get("abbrev")} @ {dom.get("abbrev")}'
+        if g.get("gameState") in ("OFF", "FINAL"):
+            nous = dom if dom.get("abbrev") == eq else ext
+            eux = ext if nous is dom else dom
+            gagne = (nous.get("score") or 0) > (eux.get("score") or 0)
+            fin = (g.get("gameOutcome") or {}).get("lastPeriodType", "REG")
+            if gagne:
+                v += 1
+            elif fin in ("OT", "SO"):
+                dp += 1
+            else:
+                d += 1
+            joues.append({
+                "date": g.get("gameDate"),
+                "match": lieu,
+                "score": f'{ext.get("abbrev")} {ext.get("score", 0)} - {dom.get("score", 0)} {dom.get("abbrev")}',
+                "gagnant": nous.get("abbrev") if gagne else eux.get("abbrev"),
+                "fin": {"REG": "temps réglementaire", "OT": "prolongation", "SO": "tirs de barrage"}.get(fin, fin),
+            })
+        else:
+            debut = g.get("startTimeUTC")
+            if debut:
+                debut = datetime.fromisoformat(debut.replace("Z", "+00:00")).astimezone(TZ).strftime("%Y-%m-%d %H:%M")
+            a_venir.append({"date_heure_est": debut or g.get("gameDate"), "match": lieu})
+    return {
+        "equipe": eq,
+        "adversaire": adv,
+        "deja_affronte_cette_saison": bool(joues),
+        "fiche": f"{v}-{d}-{dp} (victoires-défaites-défaites en prolongation) pour {eq}",
+        "matchs_joues": joues,
+        "matchs_a_venir": a_venir,
+    }
+
+
+@mcp.tool
 async def meneurs(categorie: str = "goals", limite: int = 10) -> list[dict]:
     """Meneurs de la LNH cette saison. Catégories : goals, assists, points, plusMinus,
     goalsPp, goalsSh, toi, faceoffLeaders."""
