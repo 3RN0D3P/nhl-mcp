@@ -130,7 +130,7 @@ EQUIPES = {
     "NYR": ["rangers", "new york rangers"],
     "OTT": ["ottawa", "senators", "senateurs", "sens"],
     "PHI": ["philadelphia", "philadelphie", "flyers"],
-    "PIT": ["pittsburgh", "penguins", "pingouins", "pens"],
+    "PIT": ["pittsburgh", "penguins", "pingouins", "pens", "pgh"],
     "SEA": ["seattle", "kraken"],
     "SJS": ["san jose", "sharks", "sj"],
     "STL": ["st louis", "saint louis", "blues"],
@@ -176,6 +176,11 @@ def _equipe(nom: str) -> str:
     trouve = {c for a, c in _ALIAS.items() if len(a) > 3 and f" {a} " in f" {n} "}
     if len(trouve) == 1:
         return trouve.pop()
+    # Début de nom : « pen », « pingou », « canad »… (un petit modèle invente parfois un code)
+    if len(n) >= 3:
+        trouve = {c for a, c in _ALIAS.items() if a.startswith(n)}
+        if len(trouve) == 1:
+            return trouve.pop()
     raise ValueError(
         f"Équipe inconnue : « {nom} ». Utilise une abréviation LNH : " + ", ".join(EQUIPES)
     )
