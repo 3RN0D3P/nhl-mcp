@@ -499,6 +499,73 @@ async def unites_speciales(equipe: str) -> dict:
     return out
 
 
+# ---------- Jalons (milestones) ----------
+
+def _alleger(x, max_liste: int = 5, profondeur: int = 0):
+    """Réduit une réponse JSON brute : listes coupées, champs vides et liens retirés.
+    Utile pour les endpoints LNH peu documentés (EDGE, jalons) dont les clés changent."""
+    if profondeur > 6:
+        return None
+    if isinstance(x, dict):
+        out = {}
+        for k, v in x.items():
+            if v in (None, "", [], {}) or any(m in k.lower() for m in ("url", "logo", "headshot", "image")):
+                continue
+            v = _alleger(v, max_liste, profondeur + 1)
+            if v not in (None, "", [], {}):
+                out[k] = _txt(v) if isinstance(v, dict) and set(v) <= {"default", "fr", "cs", "de", "es", "fi", "sk", "sv"} else v
+        return out
+    if isinstance(x, list):
+        return [_alleger(v, max_liste, profondeur + 1) for v in x[:max_liste]]
+    return x
+
+
+async def _id_equipe(code: str) -> int | None:
+    equipes = (await _get(f"{STATS}/team")).get("data", [])
+    return next((t["id"] for t in equipes if t.get("triCode") == code), None)
+
+
+@mcp.tool
+async def jalons(equipe: str | None = None, joueur: str | None = None,
+                 gardiens: bool = False, limite: int = 15) -> list[dict]:
+    """Jalons à venir (milestones) : joueurs qui approchent d'un chiffre rond en carrière
+    (ex. 1000e match, 500e but, 1000e point, 300e victoire d'un gardien).
+    equipe : abréviation ou nom (MTL, Canadiens, CH...). joueur : nom (filtre).
+    gardiens=True pour les jalons des gardiens."""
+    url = f"{STATS}/milestones/{'goalies' if gardiens else 'skaters'}"
+    rows = (await _get(url)).get("data", [])
+    if equipe:
+        code = _equipe(equipe)
+        tid = await _id_equipe(code)
+        rows = [r for r in rows if code in [str(v) for v in r.values()]
+                or tid in (r.get("currentTeamId"), r.get("teamId"))]
+    if joueur:
+        nom = _norm(joueur)
+        rows = [r for r in rows if any(nom in _norm(str(v)) for v in r.values() if isinstance(v, str))]
+    return [_alleger(r) for r in rows[:limite]]
+
+
+# ---------- NHL EDGE (suivi des joueurs et de la rondelle) ----------
+
+@mcp.tool
+async def edge_joueur(nom: str) -> dict:
+    """Stats NHL EDGE d'un patineur cette saison : tir le plus puissant (km/h et mi/h),
+    vitesse de patin maximale, pointes de vitesse, distance parcourue, temps par zone,
+    avec rang/percentile LNH. Accepte un nom ou un ID."""
+    j = await _trouver_joueur(nom)
+    d = await _get(f"{API}/edge/skater-detail/{j['id']}/now")
+    return {"joueur": j.get("nom"), "equipe": j.get("equipe"), "source": "NHL EDGE",
+            **_alleger(d, max_liste=3)}
+
+
+@mcp.tool
+async def edge_meneurs() -> dict:
+    """Meneurs NHL EDGE de la ligue cette saison : tir le plus puissant, patineur le plus
+    rapide, plus longue distance parcourue, etc."""
+    d = await _get(f"{API}/edge/skater-landing/now")
+    return {"source": "NHL EDGE", **_alleger(d.get("leaders", d), max_liste=3)}
+
+
 # ---------- Expected goals (MoneyPuck) ----------
 # Situations : all, 5on5, 5on4 (avantage numérique), 4on5 (désavantage), other
 
