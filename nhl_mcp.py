@@ -1124,27 +1124,32 @@ def _mmss(sec) -> str | None:
     return f"{sec // 60}:{sec % 60:02d}"
 
 
+GAMELOG_TTL = 900  # 15 min : une vingtaine d'appels par question, inutile de les refaire à chaque fois
+
+
 async def _game_log(pid: int) -> list[dict]:
+    url = f"{API}/player/{pid}/game-log/now"
+    hit = _cache.get(url)
+    if hit and time.time() - hit[0] < GAMELOG_TTL:
+        return hit[1]
     try:
-        return (await _get(f"{API}/player/{pid}/game-log/now")).get("gameLog", [])
-    except httpx.HTTPError:
+        r = await _client.get(url, follow_redirects=True)
+        r.raise_for_status()
+        log = r.json().get("gameLog", [])
+    except (httpx.HTTPError, ValueError):
         return []
+    _cache[url] = (time.time(), log)
+    return log
 
 
 @mcp.tool(output_schema=None)
 @_outil_texte
 async def tendances_joueurs(equipe: str = "MTL", stat: str = "tirs", seuil: str | None = None,
                             derniers: int = 10) -> dict:
-    """QUI dans une équipe a le plus de chances d'atteindre un nombre de tirs (lancés au but),
-    de buts, de passes ou de points ce soir. Classe TOUS les joueurs de l'équipe selon leur
-    fréquence récente. À UTILISER pour : « qui va lancer le plus ce soir ? », « qui a le plus de
-    chances de faire plus de 3 lancés ? », « qui fait souvent 4 tirs ? », « over 2.5 tirs »,
-    « qui est le plus susceptible de marquer / compter ce soir ? », « qui est en feu ? »,
-    « props / paris joueurs ». Ne pas passer une équipe à stats_joueur ou joueur_ce_soir : c'est ici.
-    equipe : abréviation ou nom (MTL, Canadiens, CH, Habs...). Défaut : MTL.
-    stat : tirs (défaut ; aussi « lancés », « SOG »), buts, passes ou points.
-    seuil : tel que dit, ex. « plus de 3 », « 4+ », « au moins 2 », « over 2.5 », 3. Le seuil
-    retenu est répété dans la réponse. Le champ « reponse » est prêt à dire."""
+    """QUI dans une équipe a le plus de chances d'atteindre X tirs (lancés), buts, passes ou
+    points ce soir : « qui va lancer le plus ? », « plus de 3 lancés ? », « over 2.5 tirs »,
+    « qui va marquer ? ». equipe : MTL, Canadiens, CH... (défaut MTL). stat : tirs, buts,
+    passes ou points. seuil : tel que dit (« plus de 3 », « 4+ », « over 2.5 »)."""
     import asyncio
     eq = _equipe(equipe or "MTL")
     cle = _stat_tendance(stat)
@@ -1213,16 +1218,12 @@ async def tendances_joueurs(equipe: str = "MTL", stat: str = "tirs", seuil: str 
     if absents:
         reponse += " Absents du dernier match ou blessés, exclus : " + ", ".join(a["joueur"] for a in absents[:4]) + "."
 
+    # Détails volontairement courts : un long JSON faisait échouer le modèle local (contexte 8k)
     return {
         "reponse": reponse,
-        "equipe": eq,
-        "adversaire_ce_soir": adv,
-        "stat": nom_stat,
-        "seuil_minimum": mini,
-        "fenetre": f"{n} derniers matchs",
-        "note": "Fréquence historique, pas une probabilité ni une cote de pari.",
-        "classement": lignes[:8],
-        "exclus": absents,
+        "seuil": seuil_txt,
+        "top5": [f'{l["joueur"]} {l["reussi_recent"]} (moy. {l["moyenne_recente"]:g})' for l in lignes[:5]],
+        "note": f"Fréquence sur les {n} derniers matchs, pas une cote de pari.",
     }
 
 
