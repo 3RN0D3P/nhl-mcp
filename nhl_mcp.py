@@ -13,6 +13,7 @@ import functools
 import inspect
 import io
 import json
+import re
 import os
 import time
 from datetime import datetime, timedelta
@@ -43,7 +44,7 @@ def _outil_texte(fn):
     @functools.wraps(fn)
     async def w(*a, **k):
         d = await fn(*a, **k)
-        reponse = d.pop("reponse", "")
+        reponse = re.sub(r"\b(" + "|".join(NOMS) + r")\b", lambda m: NOMS[m.group(1)], d.pop("reponse", ""))
         return f"{reponse}\n\nDétails : {json.dumps(d, ensure_ascii=False, separators=(',', ':'))}"
     del w.__wrapped__
     w.__signature__ = inspect.signature(fn).replace(return_annotation=str)
@@ -167,6 +168,14 @@ EQUIPES = {
     "WPG": ["winnipeg", "jets"],
     "WSH": ["washington", "capitals", "caps"],
 }
+# Noms dits dans les phrases « reponse » (le modèle 4B ne reliait pas « MTL » au « CH » demandé)
+NOMS = {"ANA": "Ducks", "BOS": "Bruins", "BUF": "Sabres", "CAR": "Hurricanes", "CBJ": "Blue Jackets",
+        "CGY": "Flames", "CHI": "Blackhawks", "COL": "Avalanche", "DAL": "Stars", "DET": "Red Wings",
+        "EDM": "Oilers", "FLA": "Panthers", "LAK": "Kings", "MIN": "Wild", "MTL": "Canadiens",
+        "NJD": "Devils", "NSH": "Predators", "NYI": "Islanders", "NYR": "Rangers", "OTT": "Sénateurs",
+        "PHI": "Flyers", "PIT": "Penguins", "SEA": "Kraken", "SJS": "Sharks", "STL": "Blues",
+        "TBL": "Lightning", "TOR": "Maple Leafs", "UTA": "Mammoth", "VAN": "Canucks",
+        "VGK": "Golden Knights", "WPG": "Jets", "WSH": "Capitals"}
 # Codes MoneyPuck différents de ceux de la LNH
 MP_CODES = {"L.A": "LAK", "N.J": "NJD", "S.J": "SJS", "T.B": "TBL"}
 
