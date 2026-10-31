@@ -122,25 +122,48 @@ async def _chercher_nom(nom: str) -> list:
     """Recherche tolérante aux fautes : un nom dicté ou tapé vite (« slafkovski », « Cole Caulfield »)
     est réessayé sans accents, avec y/i interchangés, avec une lettre en moins, puis en raccourcissant
     la fin du mot. Les candidats sont classés par ressemblance avec le nom demandé : l'API LNH renvoie
-    parfois n'importe quel « Cole » pour un nom de famille mal orthographié."""
+    parfois n'importe quel « Cole » pour un nom de famille mal orthographié. Avec un nom de famille seul,
+    un joueur du CH à une lettre près passe devant un homonyme exact (Caulfield -> Cole Caufield)."""
     dernier = _norm(nom).split(" ")[-1]
-    essais = [nom, _norm(nom), dernier]
+    seul = " " not in nom.strip()
+    base = [nom, _norm(nom), dernier]
     if dernier.endswith("i"):
-        essais.append(dernier[:-1] + "y")
+        base.append(dernier[:-1] + "y")
     if dernier.endswith("y"):
-        essais.append(dernier[:-1] + "i")
-    essais += [dernier[:i] + dernier[i + 1:] for i in range(len(dernier))]   # une lettre en trop
-    essais += [dernier[:n] for n in range(len(dernier) - 1, 3, -1)]           # fin du mot mal entendue
+        base.append(dernier[:-1] + "i")
+    phases = [
+        (base, True),
+        ([dernier[:i] + dernier[i + 1:] for i in range(len(dernier))], False),  # une lettre en trop
+        ([dernier[:n] for n in range(len(dernier) - 1, 3, -1)], False),          # fin mal entendue
+    ]
     vus, candidats = set(), {}
-    for q in essais:
-        if not q or q in vus or len(q) < 4:
-            continue
-        vus.add(q)
-        for r in await _chercher(q) or []:
-            candidats.setdefault(r.get("playerId"), r)
-        if candidats and max(_ressemblance(nom, r.get("name", "")) for r in candidats.values()) >= 0.85:
+
+    def score(r):
+        return _ressemblance(nom, r.get("name", ""))
+
+    def trouve(ch_requis):
+        bons = [r for r in candidats.values() if score(r) >= 0.85]
+        return bool(bons) and (not ch_requis or any(r.get("teamAbbrev") == "MTL" for r in bons))
+
+    for i, (essais, tous) in enumerate(phases):
+        for q in essais:
+            if not q or q in vus or len(q) < 4:
+                continue
+            vus.add(q)
+            res = await _chercher(q) if tous else await _get(SEARCH, {"culture": "en-us", "limit": 10, "q": q, "active": "true"})
+            for r in res or []:
+                candidats.setdefault(r.get("playerId"), r)
+            if not seul and trouve(False):
+                break
+        # Nom de famille seul : après la 1re phase, on ne s'arrête que si un joueur du CH ressemble ;
+        # après les variantes à une lettre près, tout bon candidat suffit.
+        if trouve(seul and i == 0):
             break
-    return sorted(candidats.values(), key=lambda r: _ressemblance(nom, r.get("name", "")), reverse=True)
+
+    def rang(r):
+        s = score(r)
+        return (seul and s >= 0.85 and r.get("teamAbbrev") == "MTL", s)
+    return sorted(candidats.values(), key=rang, reverse=True)
 
 
 async def _trouver_joueur(nom: str) -> dict:
