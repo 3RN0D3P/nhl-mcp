@@ -410,6 +410,7 @@ async def unites_speciales(equipe: str) -> dict:
 
     out = {
         "equipe": equipe,
+        "nom": team.get("fullName"),  # ex. « Montréal Canadiens » : évite qu'un petit modèle croie à une autre équipe
         "avantage_numerique": {
             "format": f'{a.get("powerPlayGoalsFor", 0)}/{a.get("ppOpportunities", 0)}',
             "pct": round((a.get("powerPlayPct") or 0) * 100, 1),
@@ -608,12 +609,13 @@ async def blesses(equipe: str | None = None, statut: str | None = None) -> dict:
     equipe : abréviation (MTL, TOR...) ou nom (Canadiens, CH, Habs...) ; sans équipe = toute la ligue.
     statut : filtre optionnel (ex. DTD = incertains pour le prochain match)."""
     rows, maj = await _blesses_mp()
-    if equipe:
-        rows = [r for r in rows if r["equipe"] == _equipe(equipe)]
+    code = _equipe(equipe) if equipe else None
+    if code:
+        rows = [r for r in rows if r["equipe"] == code]
     if statut:
         rows = [r for r in rows if r["statut"] == statut.upper()]
     rows = sorted(rows, key=lambda r: (r["equipe"] or "", r["retour_prevu"] or "9999"))
-    return {"mise_a_jour": maj, "nb": len(rows), "blesses": rows}
+    return {"equipe": code or "toute la ligue", "mise_a_jour": maj, "nb": len(rows), "blesses": rows}
 
 
 # ---------- Démarrage ----------
