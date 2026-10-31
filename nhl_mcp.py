@@ -104,13 +104,96 @@ async def _trouver_joueur(nom: str) -> dict:
     }
 
 
+# ---------- Équipes : noms, surnoms et villes -> abréviation ----------
+# Les petits modèles (ex. Ollama dans Home Assistant) passent souvent « Canadiens »
+# ou « Habs » au lieu de MTL. On accepte tout ça et on refuse clairement l'inconnu.
+
+EQUIPES = {
+    "ANA": ["anaheim", "ducks"],
+    "BOS": ["boston", "bruins"],
+    "BUF": ["buffalo", "sabres"],
+    "CAR": ["carolina", "caroline", "hurricanes", "canes"],
+    "CBJ": ["columbus", "blue jackets", "jackets"],
+    "CGY": ["calgary", "flames"],
+    "CHI": ["chicago", "blackhawks", "hawks"],
+    "COL": ["colorado", "avalanche", "avs"],
+    "DAL": ["dallas", "stars"],
+    "DET": ["detroit", "red wings", "wings"],
+    "EDM": ["edmonton", "oilers"],
+    "FLA": ["florida", "floride", "panthers"],
+    "LAK": ["los angeles", "la", "kings"],
+    "MIN": ["minnesota", "wild"],
+    "MTL": ["montreal", "canadiens", "canadien", "habs", "ch", "le ch", "glorieux", "tricolore"],
+    "NJD": ["new jersey", "devils", "nj"],
+    "NSH": ["nashville", "predators", "preds"],
+    "NYI": ["islanders", "new york islanders", "isles"],
+    "NYR": ["rangers", "new york rangers"],
+    "OTT": ["ottawa", "senators", "senateurs", "sens"],
+    "PHI": ["philadelphia", "philadelphie", "flyers"],
+    "PIT": ["pittsburgh", "penguins", "pingouins", "pens"],
+    "SEA": ["seattle", "kraken"],
+    "SJS": ["san jose", "sharks", "sj"],
+    "STL": ["st louis", "saint louis", "blues"],
+    "TBL": ["tampa", "tampa bay", "lightning", "bolts", "tb"],
+    "TOR": ["toronto", "maple leafs", "leafs"],
+    "UTA": ["utah", "mammoth", "utah mammoth", "utah hockey club"],
+    "VAN": ["vancouver", "canucks"],
+    "VGK": ["vegas", "las vegas", "golden knights", "knights", "vgk"],
+    "WPG": ["winnipeg", "jets"],
+    "WSH": ["washington", "capitals", "caps"],
+}
+# Codes MoneyPuck différents de ceux de la LNH
+MP_CODES = {"L.A": "LAK", "N.J": "NJD", "S.J": "SJS", "T.B": "TBL"}
+
+
+def _norm(s: str) -> str:
+    import unicodedata
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower()
+    s = s.replace(".", " ").replace("-", " ").replace("'", " ")
+    for mot in ("les ", "le ", "the "):
+        if s.startswith(mot) and s.strip() not in ("le ch",):
+            s = s[len(mot):]
+    return " ".join(s.split())
+
+
+_ALIAS = {}
+for _code, _noms in EQUIPES.items():
+    _ALIAS[_norm(_code)] = _code
+    for _n in _noms:
+        _ALIAS[_norm(_n)] = _code
+_ALIAS["le ch"] = _ALIAS["ch"] = "MTL"
+
+
+def _equipe(nom: str) -> str:
+    """'Canadiens', 'CH', 'Habs', 'Montréal', 'mtl' -> 'MTL'. Erreur claire si inconnue."""
+    brut = (nom or "").strip().upper()
+    if brut in MP_CODES:
+        return MP_CODES[brut]
+    n = _norm(nom or "")
+    if n in _ALIAS:
+        return _ALIAS[n]
+    # « Canadiens de Montréal », « Toronto Maple Leafs »… : on cherche un alias dans le texte
+    trouve = {c for a, c in _ALIAS.items() if len(a) > 3 and f" {a} " in f" {n} "}
+    if len(trouve) == 1:
+        return trouve.pop()
+    raise ValueError(
+        f"Équipe inconnue : « {nom} ». Utilise une abréviation LNH : " + ", ".join(EQUIPES)
+    )
+
+
+def _code_mp(code: str | None) -> str:
+    """Code d'équipe MoneyPuck -> code LNH."""
+    code = (code or "").upper()
+    return MP_CODES.get(code, code)
+
+
 def _aujourdhui() -> str:
     return datetime.now(TZ).strftime("%Y-%m-%d")
 
 
 async def _match_equipe(equipe: str, date: str | None = None) -> dict | None:
     data = await _get(f"{API}/score/{date or _aujourdhui()}")
-    equipe = equipe.upper()
+    equipe = _equipe(equipe)
     for g in data.get("games", []):
         if equipe in (g["awayTeam"].get("abbrev"), g["homeTeam"].get("abbrev")):
             return g
@@ -268,8 +351,9 @@ async def classement(division: str | None = None) -> list[dict]:
 
 @mcp.tool
 async def calendrier_equipe(equipe: str) -> list[dict]:
-    """Matchs de la semaine pour une équipe (abréviation : MTL, TOR, BOS...)."""
-    d = await _get(f"{API}/club-schedule/{equipe.upper()}/week/now")
+    """Matchs de la semaine pour une équipe. equipe : abréviation (MTL, TOR...) ou nom
+    (Canadiens, CH, Habs, Leafs...)."""
+    d = await _get(f"{API}/club-schedule/{_equipe(equipe)}/week/now")
     return [{
         "game_id": g.get("id"),
         "date": g.get("gameDate"),
@@ -307,9 +391,11 @@ def _rang(rows: list[dict], cle: str, team_id, plus_haut_meilleur=True) -> int |
 
 @mcp.tool
 async def unites_speciales(equipe: str) -> dict:
-    """Avantage numérique (AN) et désavantage numérique (DN) d'une équipe pour la saison :
-    format buts/occasions, pourcentage et rang LNH, plus le dernier match joué."""
-    equipe = equipe.upper()
+    """Unités spéciales d'une équipe : avantage numérique (AN, power play, PP) et
+    désavantage numérique (DN, penalty kill, PK) pour la saison — format buts/occasions,
+    pourcentage et rang LNH, plus le dernier match joué.
+    equipe : abréviation (MTL, TOR...) ou nom (Canadiens, CH, Habs, Leafs...)."""
+    equipe = _equipe(equipe)
     expr = f"seasonId={_saison_lnh()} and gameTypeId=2"
     equipes = (await _get(f"{STATS}/team")).get("data", [])
     team = next((t for t in equipes if t.get("triCode") == equipe), None)
@@ -401,12 +487,13 @@ async def xg_joueur(nom: str, situation: str = "all", saison: int | None = None)
 async def meneurs_xg(tri: str = "xg", situation: str = "all", equipe: str | None = None,
                      min_pj: int = 5, limite: int = 10) -> list[dict]:
     """Classement des patineurs selon MoneyPuck. tri : xg, xg_par_60, buts_moins_xg,
-    xg_pct_sur_glace, game_score. Filtre optionnel par équipe (MTL, TOR...)."""
+    xg_pct_sur_glace, game_score. Filtre optionnel par équipe (MTL, Canadiens, Leafs...)."""
+    equipe = _equipe(equipe) if equipe else None
     lignes = [
         _ligne_xg(r) for r in await _mp("skaters")
         if r.get("situation") == situation
         and _f(r, "games_played") >= min_pj
-        and (not equipe or r.get("team", "").upper() == equipe.upper())
+        and (not equipe or _code_mp(r.get("team")) == equipe)
     ]
     lignes.sort(key=lambda x: x.get(tri) or 0, reverse=True)
     return lignes[:limite]
@@ -495,7 +582,7 @@ async def _blesses_mp() -> tuple[list[dict], str | None]:
         statut = row.get("playerInjuryStatus") or ""
         rows.append({
             "joueur": row.get("playerName"),
-            "equipe": row.get("teamCode"),
+            "equipe": _code_mp(row.get("teamCode")),
             "pos": row.get("position"),
             "blessure": row.get("yahooInjuryDescription") or "Non précisé",
             "statut": statut,
@@ -518,11 +605,11 @@ async def _blesses_mp() -> tuple[list[dict], str | None]:
 async def blesses(equipe: str | None = None, statut: str | None = None) -> dict:
     """Joueurs blessés LNH (MoneyPuck) : blessure, statut (DTD, O, IR, IR-LT, IR-NR),
     retour prévu et matchs encore à manquer.
-    equipe : abréviation (MTL, TOR...) ; sans équipe = toute la ligue.
+    equipe : abréviation (MTL, TOR...) ou nom (Canadiens, CH, Habs...) ; sans équipe = toute la ligue.
     statut : filtre optionnel (ex. DTD = incertains pour le prochain match)."""
     rows, maj = await _blesses_mp()
     if equipe:
-        rows = [r for r in rows if r["equipe"] == equipe.upper()]
+        rows = [r for r in rows if r["equipe"] == _equipe(equipe)]
     if statut:
         rows = [r for r in rows if r["statut"] == statut.upper()]
     rows = sorted(rows, key=lambda r: (r["equipe"] or "", r["retour_prevu"] or "9999"))
