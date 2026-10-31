@@ -335,21 +335,31 @@ async def chercher_joueur(nom: str) -> dict:
     return await _trouver_joueur(nom)
 
 
-@mcp.tool
+@mcp.tool(output_schema=None)
+@_outil_texte
 async def stats_joueur(nom: str) -> dict:
     """Stats de la saison en cours d'un joueur (buts, passes, points, +/-, tirs, TOI moyen)
-    et ses 5 derniers matchs. Accepte un nom ou un ID."""
+    et ses 5 derniers matchs. Accepte un nom ou un ID. Le total de la saison est dans la phrase
+    de réponse ; les 5 derniers matchs sont des lignes de match, pas des totaux."""
     j = await _trouver_joueur(nom)
     d = await _get(f"{API}/player/{j['id']}/landing")
     saison = (d.get("featuredStats") or {}).get("regularSeason", {}).get("subSeason", {})
+    qui = f'{_txt(d.get("firstName"))} {_txt(d.get("lastName"))}'
+    if saison:
+        reponse = (f'{qui} ({d.get("currentTeamAbbrev")}), saison en cours : {saison.get("goals", 0)} buts, '
+                   f'{saison.get("assists", 0)} passes, {saison.get("points", 0)} points en '
+                   f'{saison.get("gamesPlayed", 0)} matchs ({saison.get("plusMinus", 0):+}).')
+    else:
+        reponse = f"{qui} n'a pas encore joué cette saison."
     return {
+        "reponse": reponse,
         "joueur": f'{_txt(d.get("firstName"))} {_txt(d.get("lastName"))}',
         "equipe": d.get("currentTeamAbbrev"),
         "position": d.get("position"),
         "numero": d.get("sweaterNumber"),
         "saison": (d.get("featuredStats") or {}).get("season"),
         "stats_saison": saison,
-        "5_derniers_matchs": [
+        "derniers_matchs_un_par_un": [
             {
                 "date": g.get("gameDate"),
                 "adversaire": g.get("opponentAbbrev"),
