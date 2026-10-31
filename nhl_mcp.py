@@ -12,7 +12,7 @@ import csv
 import io
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -95,6 +95,13 @@ async def _trouver_joueur(nom: str) -> dict:
     if not res:
         raise ValueError(f"Aucun joueur trouvé pour « {nom} »")
     p = res[0]
+    # Nom de famille seul et plusieurs joueurs du même nom (ex. Fowler) : on privilégie le CH,
+    # l'équipe suivie à la maison. Les autres restent listés dans autres_resultats.
+    if " " not in nom.strip():
+        memes = [x for x in res if _norm(x.get("name", "")).split(" ")[-1] == _norm(nom)]
+        if len(memes) > 1:
+            p = next((x for x in memes if x.get("teamAbbrev") == "MTL"), p)
+            res = [p] + [x for x in res if x is not p]
     return {
         "id": int(p["playerId"]),
         "nom": p.get("name"),
@@ -196,8 +203,43 @@ def _aujourdhui() -> str:
     return datetime.now(TZ).strftime("%Y-%m-%d")
 
 
+DATES_RELATIVES = {"aujourd hui": 0, "aujourdhui": 0, "ce soir": 0, "today": 0, "tonight": 0,
+                   "hier": -1, "hier soir": -1, "yesterday": -1, "avant hier": -2,
+                   "demain": 1, "demain soir": 1, "tomorrow": 1}
+
+
+def _date(date: str | None) -> str:
+    """AAAA-MM-JJ, « hier », « aujourd'hui », « demain »… -> AAAA-MM-JJ.
+    Refuse une date loin de la saison : les petits modèles inventent souvent l'année."""
+    auj = datetime.now(TZ).date()
+    if not date:
+        return auj.isoformat()
+    n = _norm(str(date))
+    if n in DATES_RELATIVES:
+        return (auj + timedelta(days=DATES_RELATIVES[n])).isoformat()
+    try:
+        d = datetime.strptime(str(date).strip()[:10], "%Y-%m-%d").date()
+    except ValueError:
+        raise ValueError(f"Date invalide « {date} ». Utilise AAAA-MM-JJ, « hier », « aujourd'hui » "
+                         f"ou « demain ». Aujourd'hui : {auj.isoformat()}.")
+    if abs((d - auj).days) > 300:
+        raise ValueError(f"Date « {date} » hors de la saison en cours. Aujourd'hui : {auj.isoformat()}. "
+                         "Utilise plutôt « hier », « aujourd'hui » ou « demain ».")
+    return d.isoformat()
+
+
+def _heure(utc: str | None) -> str | None:
+    if not utc:
+        return None
+    return datetime.fromisoformat(utc.replace("Z", "+00:00")).astimezone(TZ).strftime("%H:%M")
+
+
+def _jj_mm(date: str) -> str:
+    return datetime.strptime(date[:10], "%Y-%m-%d").strftime("%d/%m")
+
+
 async def _match_equipe(equipe: str, date: str | None = None) -> dict | None:
-    data = await _get(f"{API}/score/{date or _aujourdhui()}")
+    data = await _get(f"{API}/score/{_date(date)}")
     equipe = _equipe(equipe)
     for g in data.get("games", []):
         if equipe in (g["awayTeam"].get("abbrev"), g["homeTeam"].get("abbrev")):
@@ -258,10 +300,12 @@ async def stats_joueur(nom: str) -> dict:
 
 
 @mcp.tool
-async def matchs_du_jour(date: str | None = None) -> list[dict]:
-    """Matchs d'une journée (défaut : aujourd'hui, heure de l'Est) avec score, état et période.
-    date au format AAAA-MM-JJ."""
-    data = await _get(f"{API}/score/{date or _aujourdhui()}")
+async def matchs_du_jour(date: str | None = None) -> dict:
+    """Matchs et scores d'une journée (défaut : aujourd'hui, heure de l'Est) : score, état, période.
+    date : « hier », « aujourd'hui », « demain » ou AAAA-MM-JJ. Pour « les scores d'hier soir »,
+    passe date="hier". Le champ « reponse » contient la réponse prête à dire."""
+    jour = _date(date)
+    data = await _get(f"{API}/score/{jour}")
     out = []
     for g in data.get("games", []):
         debut = g.get("startTimeUTC")
@@ -276,7 +320,19 @@ async def matchs_du_jour(date: str | None = None) -> list[dict]:
             "periode": (g.get("periodDescriptor") or {}).get("number"),
             "temps_restant": (g.get("clock") or {}).get("timeRemaining"),
         })
-    return out
+    morceaux = []
+    for m in out:
+        ext, dom = m["match"].split(" @ ")
+        se, sd = m["score"].split("-")
+        if m["etat"] in ("OFF", "FINAL"):
+            morceaux.append(f"{ext} {se}, {dom} {sd} (final)")
+        elif m["etat"] in ("LIVE", "CRIT"):
+            morceaux.append(f"{ext} {se}, {dom} {sd} (en cours, {m['periode']}e période)")
+        else:
+            morceaux.append(f"{ext} à {dom} à {m['debut_est']}")
+    reponse = (f"{len(out)} match(s) le {_jj_mm(jour)} : " + " ; ".join(morceaux) + ".") if out \
+        else f"Aucun match le {_jj_mm(jour)}."
+    return {"date": jour, "reponse": reponse, "matchs": out}
 
 
 @mcp.tool
@@ -316,6 +372,7 @@ async def boxscore(game_id: int) -> dict:
 async def joueur_ce_soir(nom: str, date: str | None = None) -> dict:
     """Ligne de stats d'un joueur dans le match de son équipe aujourd'hui (ou à une date) :
     temps de glace, buts, passes, tirs. Fonctionne en direct pendant le match."""
+    date = _date(date)
     j = await _trouver_joueur(nom)
     if "equipe" not in j:
         d = await _get(f"{API}/player/{j['id']}/landing")
@@ -336,9 +393,22 @@ async def joueur_ce_soir(nom: str, date: str | None = None) -> dict:
 
 
 @mcp.tool
-async def classement(division: str | None = None) -> list[dict]:
-    """Classement LNH actuel. Filtre optionnel : division (Atlantic, Metropolitan, Central, Pacific)."""
+async def classement(division: str | None = None, equipe: str | None = None) -> dict:
+    """Classement LNH actuel. Filtres optionnels : division (Atlantic, Metropolitan, Central,
+    Pacific) ou equipe (MTL, Canadiens, CH...) pour les points et le rang d'une seule équipe.
+    Le champ « reponse » contient la réponse prête à dire."""
     d = await _get(f"{API}/standings/now")
+    code = _equipe(equipe) if equipe else None
+    if code:
+        for t in d.get("standings", []):
+            if _txt(t.get("teamAbbrev")) == code:
+                return {"reponse": (f'{code} : {t.get("points")} points en {t.get("gamesPlayed")} matchs '
+                                    f'({t.get("wins")} victoires, {t.get("losses")} défaites, '
+                                    f'{t.get("otLosses")} défaites en prolongation), '
+                                    f'{t.get("divisionSequence")}e de la division {t.get("divisionName")}, '
+                                    f'{t.get("leagueSequence")}e dans la LNH.'),
+                        "equipe": code, "pts": t.get("points"), "pj": t.get("gamesPlayed"),
+                        "rang_division": t.get("divisionSequence"), "rang_lnh": t.get("leagueSequence")}
     out = []
     for t in d.get("standings", []):
         if division and division.lower() not in (t.get("divisionName", "")).lower():
@@ -351,21 +421,73 @@ async def classement(division: str | None = None) -> list[dict]:
             "pts": t.get("points"),
             "serie": f'{t.get("streakCode", "")}{t.get("streakCount", "")}',
         })
-    return out
+    reponse = ", ".join(f'{i}. {t["equipe"]} {t["pts"]} pts' for i, t in enumerate(out[:8], 1))
+    return {"reponse": ("Classement : " + reponse + ".") if out else "Aucune équipe trouvée.",
+            "note": "v = victoires, d = défaites, dp = défaites en prolongation (pas de matchs nuls)",
+            "classement": out}
 
 
 @mcp.tool
-async def calendrier_equipe(equipe: str) -> list[dict]:
+async def calendrier_equipe(equipe: str) -> dict:
     """Matchs de CETTE SEMAINE seulement pour une équipe. Ne couvre pas le reste de la
     saison : pour savoir si deux équipes se sont déjà affrontées, utilise face_a_face.
     equipe : abréviation (MTL, TOR...) ou nom (Canadiens, CH, Habs, Leafs...)."""
-    d = await _get(f"{API}/club-schedule/{_equipe(equipe)}/week/now")
-    return [{
+    eq = _equipe(equipe)
+    d = await _get(f"{API}/club-schedule/{eq}/week/now")
+    matchs = [{
         "game_id": g.get("id"),
         "date": g.get("gameDate"),
+        "heure_est": _heure(g.get("startTimeUTC")),
         "match": f'{g["awayTeam"].get("abbrev")} @ {g["homeTeam"].get("abbrev")}',
         "etat": g.get("gameState"),
     } for g in d.get("games", [])]
+    morceaux = []
+    for m in matchs:
+        ext, dom = m["match"].split(" @ ")
+        adv = dom if ext == eq else ext
+        lieu = "à domicile" if dom == eq else f"chez {dom}"
+        morceaux.append(f'le {_jj_mm(m["date"])}' + (f' à {m["heure_est"]}' if m["heure_est"] else "")
+                        + f" contre {adv} ({lieu})")
+    reponse = (f"{eq} joue {len(matchs)} match(s) cette semaine : " + " ; ".join(morceaux) + ".") \
+        if matchs else f"{eq} ne joue pas cette semaine."
+    return {"equipe": eq, "reponse": reponse, "matchs": matchs}
+
+
+@mcp.tool
+async def dernier_match(equipe: str) -> dict:
+    """Résultat du dernier match joué par une équipe (score, adversaire, date) et son prochain
+    match. « Le score du CH hier / jeudi ? » -> cet outil. Le champ « reponse » est prêt à dire."""
+    eq = _equipe(equipe)
+    cal = await _get(f"{API}/club-schedule-season/{eq}/now")
+    games = [g for g in cal.get("games", []) if g.get("gameType") in (2, 3)]
+    fini = [g for g in games if g.get("gameState") in ("OFF", "FINAL")]
+    a_venir = [g for g in games if g.get("gameState") not in ("OFF", "FINAL")]
+    out = {"equipe": eq}
+    phrases = []
+    if fini:
+        g = fini[-1]
+        dom, ext = g["homeTeam"], g["awayTeam"]
+        nous, eux = (dom, ext) if dom.get("abbrev") == eq else (ext, dom)
+        gagne = (nous.get("score") or 0) > (eux.get("score") or 0)
+        fin = (g.get("gameOutcome") or {}).get("lastPeriodType", "REG")
+        fin_txt = {"OT": " en prolongation", "SO": " en tirs de barrage"}.get(fin, "")
+        lieu = "à domicile" if dom.get("abbrev") == eq else f'chez {dom.get("abbrev")}'
+        verbe = "a battu" if gagne else "a perdu contre"
+        hs, bs = sorted([nous.get("score", 0), eux.get("score", 0)], reverse=True)
+        phrases.append(f'Le {_jj_mm(g["gameDate"])}, {eq} {verbe} {eux.get("abbrev")} {hs}-{bs}{fin_txt} ({lieu}).')
+        out["dernier"] = {"game_id": g.get("id"), "date": g.get("gameDate"),
+                          "score": f'{ext.get("abbrev")} {ext.get("score")} - {dom.get("score")} {dom.get("abbrev")}',
+                          "victoire": gagne}
+    if a_venir:
+        g = a_venir[0]
+        dom, ext = g["homeTeam"], g["awayTeam"]
+        adv = ext.get("abbrev") if dom.get("abbrev") == eq else dom.get("abbrev")
+        lieu = "à domicile" if dom.get("abbrev") == eq else f'chez {dom.get("abbrev")}'
+        h = _heure(g.get("startTimeUTC"))
+        phrases.append(f'Prochain match : le {_jj_mm(g["gameDate"])}' + (f" à {h}" if h else "")
+                       + f" contre {adv} ({lieu}).")
+        out["prochain"] = {"game_id": g.get("id"), "date": g.get("gameDate"), "heure_est": h, "adversaire": adv}
+    return {"reponse": " ".join(phrases) or f"Aucun match trouvé pour {eq}.", **out}
 
 
 @mcp.tool
@@ -414,15 +536,19 @@ async def face_a_face(equipe: str, adversaire: str) -> dict:
         res = []
         for j in joues:
             jour = datetime.strptime(j["date"], "%Y-%m-%d").strftime("%d/%m")
-            issue = "victoire" if j["gagnant"] == eq else "défaite"
+            # « MTL 3 - 2 TOR » -> score du gagnant d'abord, lieu explicite
+            ext, se, _, sd, dom = j["score"].split(" ")
+            haut, bas = (se, sd) if j["gagnant"] == ext else (sd, se)
             fin = f' en {j["fin"]}' if j["fin"] != "temps réglementaire" else ""
-            res.append(f'{issue} {j["score"]}{fin} le {jour}')
+            res.append(f'victoire de {j["gagnant"]} {haut}-{bas}{fin} le {jour}, chez {dom}')
         phrase = (f"Oui, {eq} a déjà affronté {adv} {len(joues)} fois cette saison : "
                   + " ; ".join(res) + ".")
     else:
         phrase = f"Non, {eq} n'a pas encore affronté {adv} cette saison."
     if a_venir:
-        phrase += f' Prochain match : {a_venir[0]["date_heure_est"]}, {a_venir[0]["match"]}.'
+        dom = a_venir[0]["match"].split(" @ ")[1].split(" ")[0]
+        quand = a_venir[0]["date_heure_est"]
+        phrase += f" Prochain match : le {_jj_mm(quand)} à {quand[11:16]}, chez {dom}."
     return {
         "reponse": phrase,
         "equipe": eq,
@@ -661,7 +787,7 @@ async def xg_joueur(nom: str, situation: str = "all", saison: int | None = None)
 
 @mcp.tool
 async def meneurs_xg(tri: str = "xg", situation: str = "all", equipe: str | None = None,
-                     min_pj: int = 5, limite: int = 10) -> list[dict]:
+                     min_pj: int = 5, limite: int = 8) -> dict:
     """Classement des patineurs selon MoneyPuck. tri : xg, xg_par_60, buts_moins_xg,
     xg_pct_sur_glace, game_score. Filtre optionnel par équipe (MTL, Canadiens, Leafs...)."""
     equipe = _equipe(equipe) if equipe else None
@@ -672,12 +798,17 @@ async def meneurs_xg(tri: str = "xg", situation: str = "all", equipe: str | None
         and (not equipe or _code_mp(r.get("team")) == equipe)
     ]
     lignes.sort(key=lambda x: x.get(tri) or 0, reverse=True)
-    return lignes[:limite]
+    garder = ("joueur", "equipe", "pj", "buts", "xg", "buts_moins_xg", "xg_par_60", "xg_pct_sur_glace", "game_score")
+    lignes = [{k: l[k] for k in garder} for l in lignes[:limite]]  # compact : contexte 8k de l'assistant HA
+    reponse = ", ".join(f'{i}. {l["joueur"]} ({l["equipe"]}) {l.get(tri)}' for i, l in enumerate(lignes[:5], 1))
+    return {"tri": tri, "reponse": f"Meneurs ({tri}) : {reponse}." if lignes else "Aucun joueur trouvé.",
+            "joueurs": lignes}
 
 
 @mcp.tool
-async def xg_equipes(situation: str = "5on5") -> list[dict]:
-    """Expected goals par équipe (MoneyPuck), triés par xG% : xGF, xGA, buts vs attendus."""
+async def xg_equipes(situation: str = "5on5", equipe: str | None = None, limite: int = 10) -> dict:
+    """Expected goals par ÉQUIPE (MoneyPuck), triés par xG% : xGF, xGA, buts vs attendus.
+    « Quelle équipe a le meilleur xG% ? » -> cet outil. equipe : filtre optionnel (MTL, CH...)."""
     out = []
     for r in await _mp("teams"):
         if r.get("situation") != situation:
@@ -695,7 +826,17 @@ async def xg_equipes(situation: str = "5on5") -> list[dict]:
             "bc_moins_xga": round(_f(r, "goalsAgainst") - xga, 1),
         })
     out.sort(key=lambda x: x["xg_pct"], reverse=True)
-    return out
+    for i, r in enumerate(out, 1):
+        r["rang"] = i
+    if equipe:
+        code = _equipe(equipe)
+        out = [r for r in out if _code_mp(r["equipe"]) == code]
+        reponse = (f'{code} : xG% de {out[0]["xg_pct"]} % ({situation}), {out[0]["rang"]}e dans la LNH.'
+                   if out else f"Pas de données pour {code}.")
+    else:
+        reponse = "Meilleurs xG% (" + situation + ") : " + ", ".join(
+            f'{r["rang"]}. {r["equipe"]} {r["xg_pct"]} %' for r in out[:5]) + "."
+    return {"situation": situation, "reponse": reponse, "equipes": out[:limite]}
 
 
 @mcp.tool
