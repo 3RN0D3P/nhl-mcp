@@ -9,7 +9,10 @@ Ajouter une stat plus tard :
 """
 
 import csv
+import functools
+import inspect
 import io
+import json
 import os
 import time
 from datetime import datetime, timedelta
@@ -32,6 +35,21 @@ _cache: dict[str, tuple[float, object]] = {}
 
 
 # ---------- Utilitaires ----------
+
+def _outil_texte(fn):
+    """Fait renvoyer à un outil du texte brut : la phrase « reponse » d'abord, les détails ensuite.
+    Avec un dict, Home Assistant passe au modèle un JSON échappé en double (content +
+    structuredContent) que Qwen3 4B lisait mal (« Non » alors que deja_affronte=true)."""
+    @functools.wraps(fn)
+    async def w(*a, **k):
+        d = await fn(*a, **k)
+        reponse = d.pop("reponse", "")
+        return f"{reponse}\n\nDétails : {json.dumps(d, ensure_ascii=False, separators=(',', ':'))}"
+    del w.__wrapped__
+    w.__signature__ = inspect.signature(fn).replace(return_annotation=str)
+    w.__annotations__ = {**fn.__annotations__, "return": str}
+    return w
+
 
 async def _get(url: str, params: dict | None = None):
     key = url + str(sorted((params or {}).items()))
@@ -299,7 +317,8 @@ async def stats_joueur(nom: str) -> dict:
     }
 
 
-@mcp.tool
+@mcp.tool(output_schema=None)
+@_outil_texte
 async def matchs_du_jour(date: str | None = None) -> dict:
     """Matchs et scores d'une journée (défaut : aujourd'hui, heure de l'Est) : score, état, période.
     date : « hier », « aujourd'hui », « demain » ou AAAA-MM-JJ. Pour « les scores d'hier soir »,
@@ -392,7 +411,8 @@ async def joueur_ce_soir(nom: str, date: str | None = None) -> dict:
     return {"joueur": j.get("nom"), "message": "Joueur absent de la feuille de match (blessé ou retranché)."}
 
 
-@mcp.tool
+@mcp.tool(output_schema=None)
+@_outil_texte
 async def classement(division: str | None = None, equipe: str | None = None) -> dict:
     """Classement LNH actuel. Filtres optionnels : division (Atlantic, Metropolitan, Central,
     Pacific) ou equipe (MTL, Canadiens, CH...) pour les points et le rang d'une seule équipe.
@@ -427,7 +447,8 @@ async def classement(division: str | None = None, equipe: str | None = None) -> 
             "classement": out}
 
 
-@mcp.tool
+@mcp.tool(output_schema=None)
+@_outil_texte
 async def calendrier_equipe(equipe: str) -> dict:
     """Matchs de CETTE SEMAINE seulement pour une équipe. Ne couvre pas le reste de la
     saison : pour savoir si deux équipes se sont déjà affrontées, utilise face_a_face.
@@ -453,7 +474,8 @@ async def calendrier_equipe(equipe: str) -> dict:
     return {"equipe": eq, "reponse": reponse, "matchs": matchs}
 
 
-@mcp.tool
+@mcp.tool(output_schema=None)
+@_outil_texte
 async def dernier_match(equipe: str) -> dict:
     """Résultat du dernier match joué par une équipe (score, adversaire, date) et son prochain
     match. « Le score du CH hier / jeudi ? » -> cet outil. Le champ « reponse » est prêt à dire."""
@@ -490,7 +512,8 @@ async def dernier_match(equipe: str) -> dict:
     return {"reponse": " ".join(phrases) or f"Aucun match trouvé pour {eq}.", **out}
 
 
-@mcp.tool
+@mcp.tool(output_schema=None)
+@_outil_texte
 async def face_a_face(equipe: str, adversaire: str) -> dict:
     """À UTILISER dès que la question mentionne deux équipes : « X a-t-il déjà joué /
     affronté Y cette année ? », fiche contre Y, prochain match contre Y. Couvre toute
@@ -785,7 +808,8 @@ async def xg_joueur(nom: str, situation: str = "all", saison: int | None = None)
     return {"message": f"Pas de données MoneyPuck pour {j.get('nom', nom)} ({situation})."}
 
 
-@mcp.tool
+@mcp.tool(output_schema=None)
+@_outil_texte
 async def meneurs_xg(tri: str = "xg", situation: str = "all", equipe: str | None = None,
                      min_pj: int = 5, limite: int = 8) -> dict:
     """Classement des patineurs selon MoneyPuck. tri : xg, xg_par_60, buts_moins_xg,
@@ -805,7 +829,8 @@ async def meneurs_xg(tri: str = "xg", situation: str = "all", equipe: str | None
             "joueurs": lignes}
 
 
-@mcp.tool
+@mcp.tool(output_schema=None)
+@_outil_texte
 async def xg_equipes(situation: str = "5on5", equipe: str | None = None, limite: int = 10) -> dict:
     """Expected goals par ÉQUIPE (MoneyPuck), triés par xG% : xGF, xGA, buts vs attendus.
     « Quelle équipe a le meilleur xG% ? » -> cet outil. equipe : filtre optionnel (MTL, CH...)."""
