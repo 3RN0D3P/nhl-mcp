@@ -170,6 +170,14 @@ async def _trouver_joueur(nom: str) -> dict:
     """Résout un nom (ou un ID) en joueur actif."""
     if str(nom).isdigit():
         return {"id": int(nom)}
+    try:
+        code = _equipe(nom)
+    except ValueError:
+        code = None
+    if code and _norm(nom) in _ALIAS:
+        raise ValueError(f"« {nom} » est une équipe ({code}), pas un joueur. Pour savoir quel joueur de "
+                         f"{code} est le plus susceptible de tirer, marquer ou compter, utilise "
+                         f"tendances_joueurs(equipe=\"{code}\").")
     res = await _chercher_nom(nom)
     if not res:
         raise ValueError(f"Aucun joueur trouvé pour « {nom} »")
@@ -468,8 +476,9 @@ async def boxscore(game_id: int) -> dict:
 
 @mcp.tool
 async def joueur_ce_soir(nom: str, date: str | None = None) -> dict:
-    """Ligne de stats d'un joueur dans le match de son équipe aujourd'hui (ou à une date) :
-    temps de glace, buts, passes, tirs. Fonctionne en direct pendant le match."""
+    """Ligne de stats d'UN joueur nommé dans le match de son équipe aujourd'hui (ou à une date) :
+    temps de glace, buts, passes, tirs. Fonctionne en direct pendant le match. nom = un joueur,
+    jamais une équipe. Pour « qui a le plus de chances de... » dans une équipe : tendances_joueurs."""
     date = _date(date)
     j = await _trouver_joueur(nom)
     if "equipe" not in j:
@@ -1054,6 +1063,167 @@ async def blesses(equipe: str | None = None, statut: str | None = None) -> dict:
         rows = [r for r in rows if r["statut"] == statut.upper()]
     rows = sorted(rows, key=lambda r: (r["equipe"] or "", r["retour_prevu"] or "9999"))
     return {"equipe": code or "toute la ligue", "mise_a_jour": maj, "nb": len(rows), "blesses": rows}
+
+
+# ---------- Tendances des joueurs d'une équipe (tirs, buts, passes, points) ----------
+# Répond à « qui a le plus de chances de faire plus de 3 lancés ce soir ? » peu importe la
+# formulation : le modèle peut passer la stat et le seuil en mots, en chiffres ou en jargon de paris.
+
+STATS_TENDANCE = {
+    "shots": ["tirs", "tir", "lances", "lance", "lancers", "lancer", "lances au but", "tirs au but",
+              "sog", "shots", "shot", "shots on goal", "tir au but"],
+    "goals": ["buts", "but", "goals", "goal", "marquer", "compter", "marqueur", "buteur", "score"],
+    "assists": ["passes", "passe", "aides", "aide", "assists", "assist", "mentions d aide"],
+    "points": ["points", "point", "pts", "pt"],
+}
+NOMS_STAT = {"shots": "tirs", "goals": "buts", "assists": "passes", "points": "points"}
+SEUIL_DEFAUT = {"shots": 3, "goals": 1, "assists": 1, "points": 1}
+CHIFFRES = {"zero": 0, "un": 1, "une": 1, "deux": 2, "trois": 3, "quatre": 4, "cinq": 5, "six": 6,
+            "sept": 7, "huit": 8, "neuf": 9, "dix": 10, "one": 1, "two": 2, "three": 3, "four": 4,
+            "five": 5}
+
+
+def _stat_tendance(stat: str | None) -> str:
+    n = _norm(stat or "tirs")
+    for cle, alias in STATS_TENDANCE.items():
+        if n == cle or n in alias:
+            return cle
+    for cle, alias in STATS_TENDANCE.items():  # « plus de 3 lancés au but » passé comme stat
+        if any(f" {a} " in f" {n} " for a in alias if len(a) > 2):
+            return cle
+    raise ValueError(f"Stat inconnue « {stat} ». Choix : tirs (lancés), buts, passes, points.")
+
+
+def _seuil(seuil, stat: str) -> int:
+    """Seuil en nombre minimal : « plus de 3 » / « over 2.5 » / 3.5 -> 4 ; « 3+ », « au moins 3 », 3 -> 3."""
+    if seuil in (None, ""):
+        return SEUIL_DEFAUT[stat]
+    if isinstance(seuil, (int, float)):
+        v = float(seuil)
+        return int(v) + 1 if v != int(v) else int(v)
+    brut = str(seuil).replace(",", ".")
+    dec = re.search(r"\d+\.\d+", brut)
+    if dec:                               # 2.5 -> 3 (« over 2.5 »)
+        return int(float(dec.group())) + 1
+    n = _norm(brut)
+    for mot, val in CHIFFRES.items():
+        n = re.sub(rf"\b{mot.strip()}\b", str(val), n)
+    m = re.search(r"\d+", n)
+    if not m:
+        return SEUIL_DEFAUT[stat]
+    v = int(m.group())
+    strict = any(k in f" {n} " for k in (" plus de ", " over ", " more than ", ">", " superieur ", " au dessus "))
+    return int(v) + 1 if strict and "=" not in n else int(v)
+
+
+def _mmss(sec) -> str | None:
+    try:
+        sec = int(float(sec))
+    except (TypeError, ValueError):
+        return None
+    return f"{sec // 60}:{sec % 60:02d}"
+
+
+async def _game_log(pid: int) -> list[dict]:
+    try:
+        return (await _get(f"{API}/player/{pid}/game-log/now")).get("gameLog", [])
+    except httpx.HTTPError:
+        return []
+
+
+@mcp.tool(output_schema=None)
+@_outil_texte
+async def tendances_joueurs(equipe: str = "MTL", stat: str = "tirs", seuil: str | None = None,
+                            derniers: int = 10) -> dict:
+    """QUI dans une équipe a le plus de chances d'atteindre un nombre de tirs (lancés au but),
+    de buts, de passes ou de points ce soir. Classe TOUS les joueurs de l'équipe selon leur
+    fréquence récente. À UTILISER pour : « qui va lancer le plus ce soir ? », « qui a le plus de
+    chances de faire plus de 3 lancés ? », « qui fait souvent 4 tirs ? », « over 2.5 tirs »,
+    « qui est le plus susceptible de marquer / compter ce soir ? », « qui est en feu ? »,
+    « props / paris joueurs ». Ne pas passer une équipe à stats_joueur ou joueur_ce_soir : c'est ici.
+    equipe : abréviation ou nom (MTL, Canadiens, CH, Habs...). Défaut : MTL.
+    stat : tirs (défaut ; aussi « lancés », « SOG »), buts, passes ou points.
+    seuil : tel que dit, ex. « plus de 3 », « 4+ », « au moins 2 », « over 2.5 », 3. Le seuil
+    retenu est répété dans la réponse. Le champ « reponse » est prêt à dire."""
+    import asyncio
+    eq = _equipe(equipe or "MTL")
+    cle = _stat_tendance(stat)
+    # Seuil glissé dans la stat (« plus de 3 lancés ») : on le récupère
+    mini = _seuil(seuil if seuil not in (None, "") else (stat if re.search(r"\d|\b(un|deux|trois|quatre|cinq|six)\b", _norm(stat or "")) else None), cle)
+    n = max(3, min(int(derniers or 10), 20))
+    nom_stat = NOMS_STAT[cle]
+
+    club = await _get(f"{API}/club-stats/{eq}/now")
+    patineurs = [p for p in club.get("skaters", []) if (p.get("gamesPlayed") or 0) > 0]
+    logs = await asyncio.gather(*[_game_log(p["playerId"]) for p in patineurs])
+
+    # Dernier match joué par l'équipe : un joueur absent de ce match est probablement blessé ou retranché
+    cal = await _get(f"{API}/club-schedule-season/{eq}/now")
+    finis = [g for g in cal.get("games", []) if g.get("gameType") in (2, 3) and g.get("gameState") in ("OFF", "FINAL")]
+    dernier_id = finis[-1]["id"] if finis else None
+    try:
+        blesses_eq = {_norm(r["joueur"] or "") for r in (await _blesses_mp())[0] if r["equipe"] == eq}
+    except httpx.HTTPError:
+        blesses_eq = set()
+
+    def val(g):
+        if cle == "points":
+            return (g.get("points") if g.get("points") is not None else (g.get("goals") or 0) + (g.get("assists") or 0)) or 0
+        return g.get(cle) or 0
+
+    lignes, absents = [], []
+    for p, log in zip(patineurs, logs):
+        nom = f'{_txt(p.get("firstName"))} {_txt(p.get("lastName"))}'.strip()
+        recents = log[:n]  # l'API renvoie le plus récent d'abord
+        if not recents:
+            continue
+        reussis = sum(1 for g in recents if val(g) >= mini)
+        saison_reussis = sum(1 for g in log if val(g) >= mini)
+        ligne = {
+            "joueur": nom,
+            "pos": p.get("positionCode"),
+            "reussi_recent": f"{reussis}/{len(recents)}",
+            "pct_recent": round(100 * reussis / len(recents)),
+            "pct_saison": round(100 * saison_reussis / len(log)),
+            "moyenne_recente": round(sum(val(g) for g in recents) / len(recents), 2),
+            "5_derniers": [val(g) for g in recents[:5]],
+            "toi_moyen": _mmss(p.get("avgTimeOnIcePerGame")),
+        }
+        absent = _norm(nom) in blesses_eq or (dernier_id and recents[0].get("gameId") != dernier_id)
+        (absents if absent else lignes).append(ligne)
+
+    lignes.sort(key=lambda l: (l["pct_recent"], l["moyenne_recente"], l["pct_saison"]), reverse=True)
+
+    g = await _match_equipe(eq, None)
+    if g:
+        adv = g["homeTeam"]["abbrev"] if g["awayTeam"]["abbrev"] == eq else g["awayTeam"]["abbrev"]
+        contexte = f"ce soir contre {adv}"
+    else:
+        adv, contexte = None, "(pas de match aujourd'hui)"
+
+    seuil_txt = f"{mini} {nom_stat if mini > 1 else nom_stat.rstrip('s')} ou plus"
+    if lignes:
+        top = lignes[:3]
+        morceaux = [f'{l["joueur"]} ({l["reussi_recent"]} derniers matchs, moyenne {l["moyenne_recente"]:g})'
+                    for l in top]
+        reponse = (f"{eq} {contexte}, {seuil_txt} : le plus probable est " + morceaux[0]
+                   + (", puis " + " et ".join(morceaux[1:]) if len(morceaux) > 1 else "") + ".")
+    else:
+        reponse = f"Aucune donnée de match pour {eq} cette saison."
+    if absents:
+        reponse += " Absents du dernier match ou blessés, exclus : " + ", ".join(a["joueur"] for a in absents[:4]) + "."
+
+    return {
+        "reponse": reponse,
+        "equipe": eq,
+        "adversaire_ce_soir": adv,
+        "stat": nom_stat,
+        "seuil_minimum": mini,
+        "fenetre": f"{n} derniers matchs",
+        "note": "Fréquence historique, pas une probabilité ni une cote de pari.",
+        "classement": lignes[:8],
+        "exclus": absents,
+    }
 
 
 # ---------- Démarrage ----------
