@@ -548,6 +548,31 @@ async def jalons(equipe: str | None = None, joueur: str | None = None,
 
 # ---------- NHL EDGE (suivi des joueurs et de la rondelle) ----------
 
+MOTS_EDGE = ("shot", "speed", "skat", "distance", "zone", "burst", "percentile", "rank", "leag")
+
+
+def _aplatir(x, prefixe: str = "", out: dict | None = None) -> dict:
+    """{"topShotSpeed": {"metric": 157.9}} -> {"topShotSpeed.metric": 157.9}.
+    Ne garde que les nombres (la prose et les listes de détails font exploser le contexte
+    des petits modèles : 8k tokens pour l'assistant HA)."""
+    out = {} if out is None else out
+    if isinstance(x, dict):
+        for k, v in x.items():
+            if k.lower() in ("imperial", "mph") or "url" in k.lower():
+                continue  # on garde le métrique seulement
+            _aplatir(v, f"{prefixe}.{k}" if prefixe else k, out)
+    elif isinstance(x, (int, float)) and not isinstance(x, bool):
+        out[prefixe] = round(x, 3) if isinstance(x, float) else x
+    return out
+
+
+def _edge_compact(d: dict, max_champs: int = 30) -> dict:
+    plat = _aplatir(d)
+    utiles = {k: v for k, v in plat.items()
+              if any(m in k.lower() for m in MOTS_EDGE) and not k.lower().endswith(("id", "season", "gametype"))}
+    return dict(list(utiles.items())[:max_champs])
+
+
 @mcp.tool
 async def edge_joueur(nom: str) -> dict:
     """Stats NHL EDGE d'un patineur cette saison : tir le plus puissant (km/h et mi/h),
@@ -556,7 +581,7 @@ async def edge_joueur(nom: str) -> dict:
     j = await _trouver_joueur(nom)
     d = await _get(f"{API}/edge/skater-detail/{j['id']}/now")
     return {"joueur": j.get("nom"), "equipe": j.get("equipe"), "source": "NHL EDGE",
-            **_alleger(d, max_liste=3)}
+            "unites": "vitesses en km/h, distances en km", "stats": _edge_compact(d)}
 
 
 @mcp.tool
@@ -564,7 +589,15 @@ async def edge_meneurs() -> dict:
     """Meneurs NHL EDGE de la ligue cette saison : tir le plus puissant, patineur le plus
     rapide, plus longue distance parcourue, etc."""
     d = await _get(f"{API}/edge/skater-landing/now")
-    return {"source": "NHL EDGE", **_alleger(d.get("leaders", d), max_liste=3)}
+    meneurs = {}
+    for cat, v in (d.get("leaders") or d).items():
+        if not isinstance(v, dict):
+            continue
+        p = v.get("player") or {}
+        nom = f'{_txt(p.get("firstName"))} {_txt(p.get("lastName"))}'.strip()
+        meneurs[cat] = {"joueur": nom or None, "equipe": _txt(p.get("team", {}).get("abbrev")) if isinstance(p.get("team"), dict) else p.get("teamAbbrev"),
+                        **_edge_compact({k: x for k, x in v.items() if k != "player"}, 4)}
+    return {"source": "NHL EDGE", "unites": "vitesses en km/h, distances en km", "meneurs": meneurs}
 
 
 # ---------- Expected goals (MoneyPuck) ----------
