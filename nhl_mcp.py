@@ -1222,7 +1222,7 @@ async def tendances_joueurs(equipe: str = "MTL", stat: str = "tirs", seuil: str 
         "reponse": reponse,
         "seuil": seuil_txt,
         "top5": [f'{l["joueur"]} {l["reussi_recent"]} (moy. {l["moyenne_recente"]:g})' for l in lignes[:5]],
-        "note": f"Fréquence sur les {n} derniers matchs, pas une cote de pari.",
+        "fenetre": f"{n} derniers matchs",
     }
 
 
