@@ -412,12 +412,15 @@ async def unites_speciales(equipe: str) -> dict:
         "equipe": equipe,
         "nom": team.get("fullName"),  # ex. « Montréal Canadiens » : évite qu'un petit modèle croie à une autre équipe
         "avantage_numerique": {
-            "format": f'{a.get("powerPlayGoalsFor", 0)}/{a.get("ppOpportunities", 0)}',
+            "buts_marques": a.get("powerPlayGoalsFor", 0),
+            "occasions": a.get("ppOpportunities", 0),
             "pct": round((a.get("powerPlayPct") or 0) * 100, 1),
             "rang": _rang(pp, "powerPlayPct", tid),
         },
         "desavantage_numerique": {
-            "format": f'{d.get("timesShorthanded", 0) - d.get("ppGoalsAgainst", 0)}/{d.get("timesShorthanded", 0)}',
+            # Champs explicites : un petit modèle lisait « 43/52 » comme 43 buts alloués.
+            "punitions_tuees": d.get("timesShorthanded", 0) - d.get("ppGoalsAgainst", 0),
+            "fois_en_desavantage": d.get("timesShorthanded", 0),
             "buts_alloues": d.get("ppGoalsAgainst"),
             "pct": round((d.get("penaltyKillPct") or 0) * 100, 1),
             "rang": _rang(pk, "penaltyKillPct", tid),
@@ -438,8 +441,8 @@ async def unites_speciales(equipe: str) -> dict:
             out["dernier_match"] = {
                 "date": g.get("gameDate"),
                 "adversaire": adv,
-                "an": an.get("homeValue" if dom else "awayValue"),
-                "an_adversaire": an.get("awayValue" if dom else "homeValue"),
+                "avantage_numerique_buts_sur_occasions": an.get("homeValue" if dom else "awayValue"),
+                "desavantage_numerique_buts_alloues_sur_occasions": an.get("awayValue" if dom else "homeValue"),
             }
     except Exception as e:  # le dernier match est un bonus, pas bloquant
         out["dernier_match"] = f"indisponible ({e.__class__.__name__})"
