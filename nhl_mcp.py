@@ -104,13 +104,36 @@ def _txt(v):
     return v or ""
 
 
+async def _chercher(q: str) -> list:
+    res = await _get(SEARCH, {"culture": "en-us", "limit": 10, "q": q, "active": "true"})
+    return res or await _get(SEARCH, {"culture": "en-us", "limit": 10, "q": q})
+
+
+async def _chercher_nom(nom: str) -> list:
+    """Recherche tolérante aux fautes : un nom dicté ou tapé vite (« slafkovski », « draisaitel »)
+    est réessayé sans accents, avec y/i interchangés, puis en raccourcissant la fin du mot."""
+    essais = [nom, _norm(nom)]
+    dernier = _norm(nom).split(" ")[-1]
+    if dernier.endswith("i"):
+        essais.append(dernier[:-1] + "y")
+    if dernier.endswith("y"):
+        essais.append(dernier[:-1] + "i")
+    essais += [dernier[:n] for n in range(len(dernier) - 1, 4, -1)]
+    vus = set()
+    for q in essais:
+        if q and q not in vus:
+            vus.add(q)
+            res = await _chercher(q)
+            if res:
+                return res
+    return []
+
+
 async def _trouver_joueur(nom: str) -> dict:
     """Résout un nom (ou un ID) en joueur actif."""
     if str(nom).isdigit():
         return {"id": int(nom)}
-    res = await _get(SEARCH, {"culture": "en-us", "limit": 10, "q": nom, "active": "true"})
-    if not res:
-        res = await _get(SEARCH, {"culture": "en-us", "limit": 10, "q": nom})
+    res = await _chercher_nom(nom)
     if not res:
         raise ValueError(f"Aucun joueur trouvé pour « {nom} »")
     p = res[0]
@@ -806,23 +829,33 @@ def _ligne_xg(r: dict) -> dict:
     }
 
 
-@mcp.tool
-async def xg_joueur(nom: str, situation: str = "all", saison: int | None = None) -> dict:
-    """Expected goals d'un joueur (MoneyPuck) : xG, buts vs xG, xG/60, xG% sur glace.
-    situation : all, 5on5, 5on4, 4on5. saison : année de début (2026 = 2026-27)."""
+@mcp.tool(output_schema=None)
+@_outil_texte
+async def xg_joueur(nom: str, saison: int | None = None) -> dict:
+    """Expected goals d'un joueur (MoneyPuck), toutes situations confondues : buts, xG, buts moins xG,
+    xG/60, xG% sur glace, plus le détail 5 contre 5 et avantage numérique. saison : année de début (2026 = 2026-27)."""
     j = await _trouver_joueur(nom)
-    for r in await _mp("skaters", saison):
-        if str(r.get("playerId")) == str(j["id"]) and r.get("situation") == situation:
-            return {**_ligne_xg(r), "source": "MoneyPuck.com"}
-    return {"message": f"Pas de données MoneyPuck pour {j.get('nom', nom)} ({situation})."}
+    lignes = {r.get("situation"): r for r in await _mp("skaters", saison) if str(r.get("playerId")) == str(j["id"])}
+    if "all" not in lignes:
+        return {"reponse": f"Pas de données MoneyPuck pour {j.get('nom', nom)}."}
+    t = _ligne_xg(lignes["all"])
+    detail = {}
+    for sit, nom_sit in (("5on5", "5c5"), ("5on4", "avantage_numerique")):
+        if sit in lignes:
+            l = _ligne_xg(lignes[sit])
+            detail[nom_sit] = {"buts": l["buts"], "xg": l["xg"]}
+    reponse = (f'{t["joueur"]} ({t["equipe"]}), toutes situations : {t["buts"]} buts pour {t["xg"]} buts attendus '
+               f'({t["buts_moins_xg"]:+}) en {t["pj"]} matchs.')
+    return {"reponse": reponse, **t, "detail": detail, "source": "MoneyPuck.com"}
 
 
 @mcp.tool(output_schema=None)
 @_outil_texte
-async def meneurs_xg(tri: str = "xg", situation: str = "all", equipe: str | None = None,
+async def meneurs_xg(tri: str = "xg", equipe: str | None = None,
                      min_pj: int = 5, limite: int = 8) -> dict:
-    """Classement des patineurs selon MoneyPuck. tri : xg, xg_par_60, buts_moins_xg,
-    xg_pct_sur_glace, game_score. Filtre optionnel par équipe (MTL, Canadiens, Leafs...)."""
+    """Classement des patineurs selon MoneyPuck, toutes situations confondues. tri : xg, xg_par_60,
+    buts_moins_xg, xg_pct_sur_glace, game_score. Filtre optionnel par équipe (MTL, Canadiens, Leafs...)."""
+    situation = "all"
     equipe = _equipe(equipe) if equipe else None
     lignes = [
         _ligne_xg(r) for r in await _mp("skaters")
@@ -840,9 +873,11 @@ async def meneurs_xg(tri: str = "xg", situation: str = "all", equipe: str | None
 
 @mcp.tool(output_schema=None)
 @_outil_texte
-async def xg_equipes(situation: str = "5on5", equipe: str | None = None, limite: int = 10) -> dict:
-    """Expected goals par ÉQUIPE (MoneyPuck), triés par xG% : xGF, xGA, buts vs attendus.
-    « Quelle équipe a le meilleur xG% ? » -> cet outil. equipe : filtre optionnel (MTL, CH...)."""
+async def xg_equipes(equipe: str | None = None, cinq_contre_cinq: bool = False, limite: int = 10) -> dict:
+    """Expected goals par ÉQUIPE (MoneyPuck), triés par xG%, toutes situations : xGF, xGA, buts vs attendus.
+    « Quelle équipe a le meilleur xG% ? » -> cet outil. equipe : filtre optionnel (MTL, CH...).
+    cinq_contre_cinq : true seulement si l'utilisateur dit « 5 contre 5 »."""
+    situation = "5on5" if cinq_contre_cinq else "all"
     out = []
     for r in await _mp("teams"):
         if r.get("situation") != situation:
@@ -873,10 +908,13 @@ async def xg_equipes(situation: str = "5on5", equipe: str | None = None, limite:
     return {"situation": situation, "reponse": reponse, "equipes": out[:limite]}
 
 
-@mcp.tool
-async def gsax_gardiens(min_pj: int = 3, limite: int = 15, situation: str = "all") -> list[dict]:
+@mcp.tool(output_schema=None)
+@_outil_texte
+async def gsax_gardiens(min_pj: int = 3, limite: int = 10) -> dict:
     """Gardiens classés par buts sauvés au-dessus des attentes (GSAx, MoneyPuck).
-    GSAx positif = le gardien arrête plus que la qualité des tirs le prédit."""
+    Toutes situations. GSAx positif = le gardien arrête plus que la qualité des tirs le prédit.
+    « Meilleur gardien », « qui a le meilleur GSAx » -> cet outil."""
+    situation = "all"
     out = []
     for r in await _mp("goalies"):
         if r.get("situation") != situation or _f(r, "games_played") < min_pj:
@@ -893,7 +931,10 @@ async def gsax_gardiens(min_pj: int = 3, limite: int = 15, situation: str = "all
             "sv_pct": round(1 - ga / tirs, 3) if tirs else None,
         })
     out.sort(key=lambda x: x["gsax"], reverse=True)
-    return out[:limite]
+    out = out[:limite]
+    reponse = ("Meilleurs GSAx : " + ", ".join(
+        f'{i}. {g["gardien"]} ({g["equipe"]}) {g["gsax"]:+}' for i, g in enumerate(out[:5], 1)) + ".") if out else "Aucun gardien."
+    return {"reponse": reponse, "gardiens": out}
 
 
 # ---------- Blessés (MoneyPuck) ----------
