@@ -1144,8 +1144,7 @@ async def _game_log(pid: int) -> list[dict]:
 
 @mcp.tool(output_schema=None)
 @_outil_texte
-async def tendances_joueurs(equipe: str = "MTL", stat: str = "tirs", seuil: str | None = None,
-                            derniers: int = 10) -> dict:
+async def tendances_joueurs(equipe: str = "MTL", stat: str = "tirs", seuil: str = "") -> dict:
     """QUI dans une équipe a le plus de chances d'atteindre X tirs (lancés), buts, passes ou
     points ce soir : « qui va lancer le plus ? », « plus de 3 lancés ? », « over 2.5 tirs »,
     « qui va marquer ? ». equipe : MTL, Canadiens, CH... (défaut MTL). stat : tirs, buts,
@@ -1155,7 +1154,7 @@ async def tendances_joueurs(equipe: str = "MTL", stat: str = "tirs", seuil: str 
     cle = _stat_tendance(stat)
     # Seuil glissé dans la stat (« plus de 3 lancés ») : on le récupère
     mini = _seuil(seuil if seuil not in (None, "") else (stat if re.search(r"\d|\b(un|deux|trois|quatre|cinq|six)\b", _norm(stat or "")) else None), cle)
-    n = max(3, min(int(derniers or 10), 20))
+    n = 10
     nom_stat = NOMS_STAT[cle]
 
     club = await _get(f"{API}/club-stats/{eq}/now")
