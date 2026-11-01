@@ -105,8 +105,12 @@ def _txt(v):
 
 
 async def _chercher(q: str) -> list:
-    res = await _get(SEARCH, {"culture": "en-us", "limit": 10, "q": q, "active": "true"})
-    return res or await _get(SEARCH, {"culture": "en-us", "limit": 10, "q": q})
+    """Joueurs actifs d'abord, puis retraités : sans ça, « Martin St-Louis » tombait sur un
+    joueur actif prénommé Martin au lieu du retraité."""
+    actifs = await _get(SEARCH, {"culture": "en-us", "limit": 10, "q": q, "active": "true"}) or []
+    tous = await _get(SEARCH, {"culture": "en-us", "limit": 10, "q": q}) or []
+    vus = {r.get("playerId") for r in actifs}
+    return actifs + [r for r in tous if r.get("playerId") not in vus]
 
 
 def _ressemblance(nom: str, candidat: str) -> float:
