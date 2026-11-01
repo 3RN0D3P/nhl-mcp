@@ -1170,6 +1170,102 @@ async def carriere_joueur(nom: str, saison: str = "") -> dict:
     }
 
 
+# ---------- Recherche inversée : joueurs nés un jour donné ----------
+
+MOIS = {"janvier": 1, "jan": 1, "january": 1, "fevrier": 2, "fev": 2, "february": 2, "feb": 2, "mars": 3,
+        "march": 3, "mar": 3, "avril": 4, "april": 4, "avr": 4, "apr": 4, "mai": 5, "may": 5, "juin": 6,
+        "june": 6, "jun": 6, "juillet": 7, "july": 7, "juil": 7, "jul": 7, "aout": 8, "august": 8,
+        "aug": 8, "septembre": 9, "september": 9, "sept": 9, "sep": 9, "octobre": 10, "october": 10,
+        "oct": 10, "novembre": 11, "november": 11, "nov": 11, "decembre": 12, "december": 12, "dec": 12}
+BIOS_TTL = 86400  # les bios changent rarement : cache d'une journée
+
+
+def _jour_mois(date: str) -> tuple[int, int, int | None]:
+    """« 12 juin », « 12 juin 1993 », « 12/06 », « 1993-06-12 », « June 12 », « aujourd'hui » -> (jour, mois, année|None)."""
+    m = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", str(date or ""))
+    if m:
+        return int(m.group(3)), int(m.group(2)), int(m.group(1))
+    n = _norm(str(date or ""))
+    if n in DATES_RELATIVES:
+        d = datetime.now(TZ).date() + timedelta(days=DATES_RELATIVES[n])
+        return d.day, d.month, None
+    m = None
+    if m:
+        return int(m.group(3)), int(m.group(2)), int(m.group(1))
+    annee = re.search(r"\b(1[89]\d\d|20\d\d)\b", n)
+    annee = int(annee.group()) if annee else None
+    sans_annee = re.sub(r"\b(1[89]\d\d|20\d\d)\b", " ", n)
+    for mot, mois in sorted(MOIS.items(), key=lambda x: -len(x[0])):
+        if re.search(rf"\b{mot}\b", sans_annee):
+            j = re.search(r"\b(\d{1,2})(?:er|e)?\b", sans_annee)
+            if j:
+                return int(j.group(1)), mois, annee
+    m = re.search(r"\b(\d{1,2})[/.](\d{1,2})\b", sans_annee)  # 12/06 = 12 juin (format québécois)
+    if m:
+        return int(m.group(1)), int(m.group(2)), annee
+    raise ValueError(f"Date « {date} » non comprise. Exemple : « 12 juin » ou « 1993-06-12 ».")
+
+
+async def _bios(saisons: str) -> list[dict]:
+    """Bios LNH (date et lieu de naissance) des patineurs et gardiens. saisons = 'actifs' ou 'toutes'."""
+    cle = f"bios:{saisons}"
+    hit = _cache.get(cle)
+    if hit and time.time() - hit[0] < BIOS_TTL:
+        return hit[1]
+    if saisons == "toutes":
+        expr = f"seasonId>=19171918 and seasonId<={_saison_lnh()} and gameTypeId=2"
+        agg = "true"
+    else:
+        expr = f"seasonId={_saison_lnh()} and gameTypeId=2"
+        agg = "false"
+    rows = []
+    for genre, champ_nom in (("skater", "skaterFullName"), ("goalie", "goalieFullName")):
+        r = await _client.get(f"{STATS}/{genre}/bios", follow_redirects=True, timeout=60,
+                              params={"isAggregate": agg, "isGame": "false", "limit": -1, "cayenneExp": expr})
+        r.raise_for_status()
+        for x in r.json().get("data", []):
+            rows.append({
+                "nom": x.get(champ_nom) or x.get("fullName"),
+                "naissance": (x.get("birthDate") or "")[:10],
+                "lieu": ", ".join(v for v in (x.get("birthCity"), x.get("birthStateProvinceCode"),
+                                              x.get("birthCountryCode")) if v),
+                "equipe": x.get("currentTeamAbbrev") or x.get("teamAbbrevs") or "",
+                "pos": x.get("positionCode") or ("G" if genre == "goalie" else ""),
+                "pj": x.get("gamesPlayed"),
+            })
+    _cache[cle] = (time.time(), rows)
+    return rows
+
+
+@mcp.tool(output_schema=None)
+@_outil_texte
+async def nes_le(date: str, toutes_les_epoques: str = "non") -> dict:
+    """RECHERCHE INVERSÉE : quels joueurs de la LNH sont nés un jour donné (anniversaires).
+    « Quel joueur est né le 12 juin ? », « qui fête son anniversaire aujourd'hui ? », « joueurs nés le
+    12 juin 1993 ». date : « 12 juin », « aujourd'hui », « 1993-06-12 »... Par défaut : joueurs de la
+    saison en cours. toutes_les_epoques : « oui » pour chercher aussi parmi les anciens joueurs."""
+    jour, mois, annee = _jour_mois(date)
+    epoque = "toutes" if _norm(str(toutes_les_epoques)) in ("oui", "yes", "true", "1", "toutes") else "actifs"
+    rows = await _bios(epoque)
+    mmjj = f"-{mois:02d}-{jour:02d}"
+    trouves = [r for r in rows if r["naissance"].endswith(mmjj) and (not annee or r["naissance"].startswith(str(annee)))]
+    # Plus de matchs d'abord : les noms connus sortent en premier
+    trouves.sort(key=lambda r: -(r.get("pj") or 0))
+    noms_mois = ["", "janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août",
+                 "septembre", "octobre", "novembre", "décembre"]
+    quand = f"{jour} {noms_mois[mois]}" + (f" {annee}" if annee else "")
+    portee = "dans l'histoire de la LNH" if epoque == "toutes" else "parmi les joueurs de cette saison"
+    if not trouves:
+        reponse = f"Aucun joueur né le {quand} {portee}."
+    else:
+        tete = ", ".join(f'{r["nom"]} ({r["equipe"] or "retraité"}, {r["naissance"][:4]})' for r in trouves[:3])
+        reste = len(trouves) - 3
+        reponse = (f"{len(trouves)} joueur(s) né(s) le {quand} {portee} : {tete}"
+                   + (f", et {reste} autre(s)" if reste > 0 else "") + ".")
+    return {"reponse": reponse,
+            "joueurs": [f'{r["nom"]} · {r["pos"]} · {r["equipe"] or "-"} · {r["naissance"]} · {r["lieu"]}' for r in trouves[:15]]}
+
+
 # ---------- Tendances des joueurs d'une équipe (tirs, buts, passes, points) ----------
 # Répond à « qui a le plus de chances de faire plus de 3 lancés ce soir ? » peu importe la
 # formulation : le modèle peut passer la stat et le seuil en mots, en chiffres ou en jargon de paris.
