@@ -1178,6 +1178,7 @@ MOIS = {"janvier": 1, "jan": 1, "january": 1, "fevrier": 2, "fev": 2, "february"
         "aug": 8, "septembre": 9, "september": 9, "sept": 9, "sep": 9, "octobre": 10, "october": 10,
         "oct": 10, "novembre": 11, "november": 11, "nov": 11, "decembre": 12, "december": 12, "dec": 12}
 BIOS_TTL = 86400  # les bios changent rarement : cache d'une journée
+_tache_bios = None
 
 
 def _jour_mois(date: str) -> tuple[int, int, int | None]:
@@ -1220,7 +1221,7 @@ async def _bios(saisons: str) -> list[dict]:
         agg = "false"
     rows = []
     for genre, champ_nom in (("skater", "skaterFullName"), ("goalie", "goalieFullName")):
-        r = await _client.get(f"{STATS}/{genre}/bios", follow_redirects=True, timeout=60,
+        r = await _client.get(f"{STATS}/{genre}/bios", follow_redirects=True, timeout=300,
                               params={"isAggregate": agg, "isGame": "false", "limit": -1, "cayenneExp": expr})
         r.raise_for_status()
         for x in r.json().get("data", []):
@@ -1246,7 +1247,20 @@ async def nes_le(date: str, toutes_les_epoques: str = "non") -> dict:
     saison en cours. toutes_les_epoques : « oui » pour chercher aussi parmi les anciens joueurs."""
     jour, mois, annee = _jour_mois(date)
     epoque = "toutes" if _norm(str(toutes_les_epoques)) in ("oui", "yes", "true", "1", "toutes") else "actifs"
-    rows = await _bios(epoque)
+    if epoque == "toutes" and not (_cache.get("bios:toutes") and time.time() - _cache["bios:toutes"][0] < BIOS_TTL):
+        # Toute l'histoire = des milliers de joueurs, lent la première fois : on prépare la liste en
+        # arrière-plan et on répond tout de suite si elle n'est pas prête (le client HA coupe vite).
+        import asyncio
+        global _tache_bios
+        if _tache_bios is None or _tache_bios.done():
+            _tache_bios = asyncio.create_task(_bios("toutes"))
+        try:
+            rows = await asyncio.wait_for(asyncio.shield(_tache_bios), 8)
+        except asyncio.TimeoutError:
+            return {"reponse": "Je prépare la liste de tous les joueurs de l'histoire de la LNH, ça prend "
+                               "une minute la première fois. Réessaie dans un instant."}
+    else:
+        rows = await _bios(epoque)
     mmjj = f"-{mois:02d}-{jour:02d}"
     trouves = [r for r in rows if r["naissance"].endswith(mmjj) and (not annee or r["naissance"].startswith(str(annee)))]
     # Plus de matchs d'abord : les noms connus sortent en premier
