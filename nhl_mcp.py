@@ -1088,7 +1088,8 @@ def _saison_voulue(saison: str) -> str | None:
 @_outil_texte
 async def carriere_joueur(nom: str, saison: str = "") -> dict:
     """Âge, date et lieu de naissance, taille, poids, repêchage et stats de CARRIÈRE d'un joueur,
-    avec ses stats saison par saison dans la LNH (toutes les années). « Quel âge a X ? »,
+    avec ses stats saison par saison dans la LNH (toutes les années) et ses TROPHÉES (Hart, Art Ross,
+    Vézina, Calder, Conn Smythe...) de toutes les saisons. « Quel âge a X ? », « quels trophées a gagné X ? »,
     « combien de buts X a-t-il en carrière ? », « ses stats en 2018-19 ? » -> cet outil.
     saison : optionnelle (« 2018-19 », « 2018 ») pour une seule saison passée."""
     j = await _trouver_joueur(nom)
@@ -1116,6 +1117,20 @@ async def carriere_joueur(nom: str, saison: str = "") -> dict:
                 f'{s.get("goals", 0)} B, {s.get("assists", 0)} A, {s.get("points", 0)} PTS')
 
     lnh = [s for s in d.get("seasonTotals", []) if s.get("leagueAbbrev") == "NHL" and s.get("gameTypeId") == 2]
+
+    # Trophées : [{"trophy": {"default": "Art Ross Trophy", "fr": "Trophée Art Ross"}, "seasons": [{"seasonId": 20182019}]}]
+    trophees = []  # (saison, nom)
+    for a in d.get("awards", []) or []:
+        nom_t = _txt(a.get("trophy"))
+        for se in a.get("seasons", []) or []:
+            trophees.append((str(se.get("seasonId")), nom_t))
+    trophees.sort()
+
+    def txt_trophees(liste):
+        par_nom = {}
+        for sa, nt in liste:
+            par_nom.setdefault(nt, []).append(_saison_txt(sa))
+        return " ; ".join(f"{nt} ({', '.join(sa)})" for nt, sa in par_nom.items())
     carriere = ((d.get("careerTotals") or {}).get("regularSeason") or {})
 
     voulue = _saison_voulue(saison) if saison else None
@@ -1123,6 +1138,9 @@ async def carriere_joueur(nom: str, saison: str = "") -> dict:
         lignes = [s for s in lnh if str(s.get("season")) == voulue]
         if lignes:
             reponse = f"{qui}, " + " ; ".join(ligne(s) for s in lignes) + "."
+            cette = [t for t in trophees if t[0] == voulue]
+            if cette:
+                reponse += " Trophées cette saison-là : " + txt_trophees(cette) + "."
         else:
             reponse = f"{qui} n'a pas joué dans la LNH en {_saison_txt(voulue)}."
         return {"reponse": reponse}
@@ -1134,7 +1152,8 @@ async def carriere_joueur(nom: str, saison: str = "") -> dict:
         tot = (f'{carriere.get("goals", 0)} buts, {carriere.get("assists", 0)} passes, '
                f'{carriere.get("points", 0)} points en {carriere.get("gamesPlayed", 0)} matchs')
     reponse = (f"{qui}" + (f" a {age} ans (né le {d['birthDate']}" + (f" à {lieu}" if lieu else "") + ")" if age is not None else "")
-               + f". En carrière dans la LNH : {tot}.")
+               + f". En carrière dans la LNH : {tot}."
+               + (f" Trophées : {txt_trophees(trophees)}." if trophees else ""))
     return {
         "reponse": reponse,
         "equipe": d.get("currentTeamAbbrev"),
@@ -1142,6 +1161,7 @@ async def carriere_joueur(nom: str, saison: str = "") -> dict:
         "taille_cm": d.get("heightInCentimeters"),
         "poids_kg": d.get("weightInKilograms"),
         "repechage": repechage,
+        "trophees": [f"{_saison_txt(sa)} {nt}" for sa, nt in trophees],
         "saisons_lnh": [ligne(s) for s in lnh],
     }
 
