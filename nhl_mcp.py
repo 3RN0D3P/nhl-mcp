@@ -1065,6 +1065,87 @@ async def blesses(equipe: str | None = None, statut: str | None = None) -> dict:
     return {"equipe": code or "toute la ligue", "mise_a_jour": maj, "nb": len(rows), "blesses": rows}
 
 
+# ---------- Carrière d'un joueur (âge, bio, saison par saison) ----------
+
+def _saison_txt(s) -> str:
+    s = str(s)
+    return f"{s[:4]}-{s[6:8]}" if len(s) == 8 else s
+
+
+def _saison_voulue(saison: str) -> str | None:
+    """« 2018 », « 2018-19 », « 2018-2019 », « 20182019 » -> « 20182019 » (2018 = saison 2018-19)."""
+    brut = str(saison or "").strip()
+    if re.fullmatch(r"\d{8}", brut):
+        return brut
+    m = re.search(r"\d{4}", brut)
+    if not m:
+        return None
+    a = int(m.group())
+    return f"{a}{a + 1}"
+
+
+@mcp.tool(output_schema=None)
+@_outil_texte
+async def carriere_joueur(nom: str, saison: str = "") -> dict:
+    """Âge, date et lieu de naissance, taille, poids, repêchage et stats de CARRIÈRE d'un joueur,
+    avec ses stats saison par saison dans la LNH (toutes les années). « Quel âge a X ? »,
+    « combien de buts X a-t-il en carrière ? », « ses stats en 2018-19 ? » -> cet outil.
+    saison : optionnelle (« 2018-19 », « 2018 ») pour une seule saison passée."""
+    j = await _trouver_joueur(nom)
+    d = await _get(f"{API}/player/{j['id']}/landing")
+    qui = f'{_txt(d.get("firstName"))} {_txt(d.get("lastName"))}'
+    gardien = d.get("position") == "G"
+
+    age = None
+    if d.get("birthDate"):
+        n = datetime.strptime(d["birthDate"], "%Y-%m-%d").date()
+        auj = datetime.now(TZ).date()
+        age = auj.year - n.year - ((auj.month, auj.day) < (n.month, n.day))
+    lieu = ", ".join(x for x in (_txt(d.get("birthCity")), _txt(d.get("birthStateProvince")),
+                                  d.get("birthCountry")) if x)
+    dr = d.get("draftDetails") or {}
+    repechage = (f'{dr.get("year")}, {dr.get("teamAbbrev")}, {dr.get("overallPick")}e au total'
+                 if dr.get("year") else "non repêché")
+
+    def ligne(s):
+        if gardien:
+            return (f'{_saison_txt(s.get("season"))} {_txt(s.get("teamName"))}: '
+                    f'{s.get("gamesPlayed", 0)} PJ, {s.get("wins", 0)} V, '
+                    f'{(s.get("savePctg") or 0):.3f} %arr, {(s.get("goalsAgainstAvg") or 0):.2f} MBA')
+        return (f'{_saison_txt(s.get("season"))} {_txt(s.get("teamName"))}: {s.get("gamesPlayed", 0)} PJ, '
+                f'{s.get("goals", 0)} B, {s.get("assists", 0)} A, {s.get("points", 0)} PTS')
+
+    lnh = [s for s in d.get("seasonTotals", []) if s.get("leagueAbbrev") == "NHL" and s.get("gameTypeId") == 2]
+    carriere = ((d.get("careerTotals") or {}).get("regularSeason") or {})
+
+    voulue = _saison_voulue(saison) if saison else None
+    if voulue:
+        lignes = [s for s in lnh if str(s.get("season")) == voulue]
+        if lignes:
+            reponse = f"{qui}, " + " ; ".join(ligne(s) for s in lignes) + "."
+        else:
+            reponse = f"{qui} n'a pas joué dans la LNH en {_saison_txt(voulue)}."
+        return {"reponse": reponse}
+
+    if gardien:
+        tot = (f'{carriere.get("gamesPlayed", 0)} matchs, {carriere.get("wins", 0)} victoires, '
+               f'{carriere.get("shutouts", 0)} blanchissages')
+    else:
+        tot = (f'{carriere.get("goals", 0)} buts, {carriere.get("assists", 0)} passes, '
+               f'{carriere.get("points", 0)} points en {carriere.get("gamesPlayed", 0)} matchs')
+    reponse = (f"{qui}" + (f" a {age} ans (né le {d['birthDate']}" + (f" à {lieu}" if lieu else "") + ")" if age is not None else "")
+               + f". En carrière dans la LNH : {tot}.")
+    return {
+        "reponse": reponse,
+        "equipe": d.get("currentTeamAbbrev"),
+        "position": d.get("position"),
+        "taille_cm": d.get("heightInCentimeters"),
+        "poids_kg": d.get("weightInKilograms"),
+        "repechage": repechage,
+        "saisons_lnh": [ligne(s) for s in lnh],
+    }
+
+
 # ---------- Tendances des joueurs d'une équipe (tirs, buts, passes, points) ----------
 # Répond à « qui a le plus de chances de faire plus de 3 lancés ce soir ? » peu importe la
 # formulation : le modèle peut passer la stat et le seuil en mots, en chiffres ou en jargon de paris.
