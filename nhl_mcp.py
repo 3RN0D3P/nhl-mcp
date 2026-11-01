@@ -1276,8 +1276,9 @@ async def nes_le(date: str, toutes_les_epoques: str = "non") -> dict:
         reste = len(trouves) - 3
         reponse = (f"{len(trouves)} joueur(s) né(s) le {quand} {portee} : {tete}"
                    + (f", et {reste} autre(s)" if reste > 0 else "") + ".")
+    # Détails courts : avec une longue liste, le modèle vocal récitait 15 noms en puces.
     return {"reponse": reponse,
-            "joueurs": [f'{r["nom"]} · {r["pos"]} · {r["equipe"] or "-"} · {r["naissance"]} · {r["lieu"]}' for r in trouves[:15]]}
+            "autres": [f'{r["nom"]} ({r["naissance"][:4]})' for r in trouves[3:8]]}
 
 
 # ---------- Tendances des joueurs d'une équipe (tirs, buts, passes, points) ----------
