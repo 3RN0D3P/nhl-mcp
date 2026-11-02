@@ -675,16 +675,60 @@ async def face_a_face(equipe: str, adversaire: str) -> dict:
     }
 
 
-@mcp.tool
-async def meneurs(categorie: str = "goals", limite: int = 10) -> list[dict]:
-    """Meneurs de la LNH cette saison. Catégories : goals, assists, points, plusMinus,
-    goalsPp, goalsSh, toi, faceoffLeaders."""
-    d = await _get(f"{API}/skater-stats-leaders/current", {"categories": categorie, "limit": limite})
-    return [{
-        "joueur": f'{_txt(p.get("firstName"))} {_txt(p.get("lastName"))}',
-        "equipe": p.get("teamAbbrev"),
-        "valeur": p.get("value"),
-    } for p in d.get(categorie, [])]
+# Catégorie des meneurs -> (champ de /club-stats, libellé dit à voix haute)
+_MENEURS_CLUB = {
+    "goals": ("goals", "buts"), "assists": ("assists", "passes"), "points": ("points", "points"),
+    "plusMinus": ("plusMinus", "+/-"), "goalsPp": ("powerPlayGoals", "buts en avantage numérique"),
+    "goalsSh": ("shorthandedGoals", "buts en désavantage numérique"),
+    "toi": ("avgTimeOnIcePerGame", "temps de glace moyen"),
+    "faceoffLeaders": ("faceoffWinPctg", "% de mises en jeu gagnées"),
+}
+_MENEURS_SYN = {"buts": "goals", "but": "goals", "passes": "assists", "passe": "assists",
+                "aides": "assists", "pts": "points", "point": "points", "differentiel": "plusMinus",
+                "+/-": "plusMinus", "temps de glace": "toi", "mises en jeu": "faceoffLeaders"}
+
+
+@mcp.tool(output_schema=None)
+@_outil_texte
+async def meneurs(categorie: str = "points", limite: int = 5, equipe: str | None = None) -> dict:
+    """Meneurs cette saison, de toute la LNH ou d'UNE équipe. Pour « les meneurs du Canadien »,
+    passe equipe="MTL" (Canadiens, CH, Habs... acceptés). Catégories : points, goals (buts),
+    assists (passes), plusMinus, goalsPp, goalsSh, toi, faceoffLeaders.
+    Le champ « reponse » contient la réponse prête à dire."""
+    cat = _MENEURS_SYN.get(_norm(categorie or "points"), categorie or "points")
+    if cat not in _MENEURS_CLUB:
+        cat = "points"
+    champ, libelle = _MENEURS_CLUB[cat]
+    limite = max(1, min(int(limite or 5), 20))
+
+    if equipe:
+        eq = _equipe(equipe)
+        club = await _get(f"{API}/club-stats/{eq}/now")
+        joueurs = [p for p in club.get("skaters", []) if (p.get("gamesPlayed") or 0) > 0]
+        if cat == "faceoffLeaders":  # sans minimum, un joueur à 1 mise en jeu sur 1 serait premier
+            joueurs = [p for p in joueurs if p.get("positionCode") == "C"]
+        joueurs.sort(key=lambda p: p.get(champ) or 0, reverse=True)
+        lignes = []
+        for p in joueurs[:limite]:
+            v = p.get(champ)
+            if cat == "toi":
+                v = _mmss(v)
+            elif cat == "faceoffLeaders" and v is not None:
+                v = f"{round(100 * v, 1)} %"
+            lignes.append({"joueur": f'{_txt(p.get("firstName"))} {_txt(p.get("lastName"))}', "valeur": v})
+        portee = f"Meneurs des {eq}"
+    else:
+        d = await _get(f"{API}/skater-stats-leaders/current", {"categories": cat, "limit": limite})
+        lignes = [{"joueur": f'{_txt(p.get("firstName"))} {_txt(p.get("lastName"))}',
+                   "equipe": p.get("teamAbbrev"), "valeur": p.get("value")} for p in d.get(cat, [])]
+        portee = "Meneurs de la LNH"
+
+    if not lignes:
+        return {"reponse": f"{portee} : aucune donnée pour l'instant."}
+    morceaux = [f'{l["joueur"]}' + (f' ({l["equipe"]})' if l.get("equipe") else "") + f' {l["valeur"]}'
+                for l in lignes]
+    return {"reponse": f"{portee} en {libelle} : " + ", ".join(morceaux) + ".",
+            "categorie": cat, "meneurs": lignes}
 
 
 # ---------- Unités spéciales ----------
