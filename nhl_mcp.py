@@ -682,10 +682,19 @@ _MENEURS_CLUB = {
     "goalsSh": ("shorthandedGoals", "buts en désavantage numérique"),
     "toi": ("avgTimeOnIcePerGame", "temps de glace moyen"),
     "faceoffLeaders": ("faceoffWinPctg", "% de mises en jeu gagnées"),
+    "penaltyMins": ("penaltyMinutes", "minutes de pénalité"),
+    "shots": ("shots", "tirs"),
+    "gameWinningGoals": ("gameWinningGoals", "buts gagnants"),
 }
+# Catégories absentes de /skater-stats-leaders : classement LNH via l'API stats (skater/summary)
+_MENEURS_STATS = {"penaltyMins": "penaltyMinutes", "shots": "shots", "gameWinningGoals": "gameWinningGoals"}
 _MENEURS_SYN = {"buts": "goals", "but": "goals", "passes": "assists", "passe": "assists",
                 "aides": "assists", "pts": "points", "point": "points", "differentiel": "plusMinus",
-                "+/-": "plusMinus", "temps de glace": "toi", "mises en jeu": "faceoffLeaders"}
+                "+/-": "plusMinus", "temps de glace": "toi", "mises en jeu": "faceoffLeaders",
+                "pim": "penaltyMins", "penalites": "penaltyMins", "penalite": "penaltyMins",
+                "minutes de penalite": "penaltyMins", "penaltyminutes": "penaltyMins",
+                "tirs": "shots", "tir": "shots", "lances": "shots", "lancers": "shots",
+                "buts gagnants": "gameWinningGoals", "gwg": "gameWinningGoals"}
 
 
 @mcp.tool(output_schema=None)
@@ -693,11 +702,14 @@ _MENEURS_SYN = {"buts": "goals", "but": "goals", "passes": "assists", "passe": "
 async def meneurs(categorie: str = "points", limite: int = 5, equipe: str | None = None) -> dict:
     """Meneurs cette saison, de toute la LNH ou d'UNE équipe. Pour « les meneurs du Canadien »,
     passe equipe="MTL" (Canadiens, CH, Habs... acceptés). Catégories : points, goals (buts),
-    assists (passes), plusMinus, goalsPp, goalsSh, toi, faceoffLeaders.
+    assists (passes), plusMinus, goalsPp, goalsSh, toi, faceoffLeaders, penaltyMins
+    (PIM, minutes de pénalité), shots (tirs, lancers), gameWinningGoals (buts gagnants).
     Le champ « reponse » contient la réponse prête à dire."""
     cat = _MENEURS_SYN.get(_norm(categorie or "points"), categorie or "points")
     if cat not in _MENEURS_CLUB:
-        cat = "points"
+        return {"reponse": f"Catégorie inconnue : « {categorie} ». Choix : points, buts, passes, "
+                           "plus-moins, buts en avantage numérique, buts en désavantage numérique, "
+                           "temps de glace, mises en jeu, minutes de pénalité, tirs, buts gagnants."}
     champ, libelle = _MENEURS_CLUB[cat]
     limite = max(1, min(int(limite or 5), 20))
 
@@ -717,6 +729,16 @@ async def meneurs(categorie: str = "points", limite: int = 5, equipe: str | None
                 v = f"{round(100 * v, 1)} %"
             lignes.append({"joueur": f'{_txt(p.get("firstName"))} {_txt(p.get("lastName"))}', "valeur": v})
         portee = f"Meneurs des {eq}"
+    elif cat in _MENEURS_STATS:
+        cle = _MENEURS_STATS[cat]
+        d = await _get(f"{STATS}/skater/summary", {
+            "isAggregate": "false", "isGame": "false", "start": 0, "limit": limite,
+            "sort": json.dumps([{"property": cle, "direction": "DESC"}]),
+            "cayenneExp": f"seasonId={_saison_lnh()} and gameTypeId=2"})
+        lignes = [{"joueur": r.get("skaterFullName"),
+                   "equipe": (r.get("teamAbbrevs") or "").split(",")[-1].strip() or None,
+                   "valeur": r.get(cle)} for r in d.get("data", [])]
+        portee = "Meneurs de la LNH"
     else:
         d = await _get(f"{API}/skater-stats-leaders/current", {"categories": cat, "limit": limite})
         lignes = [{"joueur": f'{_txt(p.get("firstName"))} {_txt(p.get("lastName"))}',
