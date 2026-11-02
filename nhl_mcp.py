@@ -1508,6 +1508,23 @@ async def tendances_joueurs(equipe: str = "MTL", stat: str = "tirs", seuil: str 
     }
 
 
+# ---------- Santé (Uptime Kuma, Homepage) ----------
+
+_DEMARRAGE = time.time()
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def sante(request):
+    """Hors du chemin secret : dit seulement si le serveur tourne, sans rien exposer d'autre."""
+    from starlette.responses import JSONResponse
+    try:
+        outils = await mcp.list_tools()
+    except AttributeError:  # FastMCP 2.x
+        outils = await mcp.get_tools()
+    return JSONResponse({"statut": "ok", "outils": len(outils),
+                         "en_ligne_depuis_h": round((time.time() - _DEMARRAGE) / 3600, 1)})
+
+
 # ---------- Démarrage ----------
 
 if __name__ == "__main__":
