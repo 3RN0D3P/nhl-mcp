@@ -372,6 +372,39 @@ async def chercher_joueur(nom: str) -> dict:
 
 @mcp.tool(output_schema=None)
 @_outil_texte
+async def alignement(equipe: str = "MTL", numero: int | None = None, position: str | None = None) -> dict:
+    """Alignement actuel d'une équipe avec les numéros de chandail. « Qui porte le numéro 63 du CH ? »,
+    « Qui sont les gardiens du Canadien ? » -> cet outil. numero : un numéro de chandail précis.
+    position : attaquants, defenseurs ou gardiens. Ne jamais deviner un numéro de mémoire."""
+    code = _equipe(equipe)
+    d = await _get(f"{API}/roster/{code}/current")
+    groupes = {"attaquants": "forwards", "defenseurs": "defensemen", "gardiens": "goalies"}
+    joueurs = []
+    for fr, en in groupes.items():
+        for p in d.get(en, []):
+            joueurs.append({
+                "no": p.get("sweaterNumber"),
+                "nom": f'{_txt(p.get("firstName"))} {_txt(p.get("lastName"))}',
+                "pos": p.get("positionCode"),
+                "groupe": fr,
+            })
+    joueurs.sort(key=lambda j: j["no"] or 999)
+    if numero is not None:
+        j = next((j for j in joueurs if j["no"] == int(numero)), None)
+        reponse = (f'Le numéro {numero} des {NOMS.get(code, code)} est {j["nom"]} ({j["pos"]}).' if j
+                   else f"Personne ne porte le numéro {numero} chez les {NOMS.get(code, code)} en ce moment.")
+        return {"reponse": reponse, "joueur": j}
+    if position:
+        cle = _norm(position)
+        cle = next((k for k in groupes if k.startswith(cle[:4])), None)
+        if cle:
+            joueurs = [j for j in joueurs if j["groupe"] == cle]
+    reponse = f"Alignement des {NOMS.get(code, code)} : " + ", ".join(f'#{j["no"]} {j["nom"]}' for j in joueurs) + "."
+    return {"reponse": reponse, "joueurs": joueurs}
+
+
+@mcp.tool(output_schema=None)
+@_outil_texte
 async def stats_joueur(nom: str) -> dict:
     """Stats de la saison en cours d'un joueur (buts, passes, points, +/-, tirs, TOI moyen)
     et ses 5 derniers matchs. Accepte un nom ou un ID. Le total de la saison est dans la phrase
