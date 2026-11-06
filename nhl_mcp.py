@@ -1457,26 +1457,27 @@ async def _game_log(pid: int) -> list[dict]:
     return log
 
 
-@mcp.tool(output_schema=None)
-@_outil_texte
-async def tendances_joueurs(equipe: str = "MTL", stat: str = "tirs", seuil: str = "") -> dict:
-    """QUI dans une équipe a le plus de chances d'atteindre X tirs (lancés), buts, passes ou
-    points ce soir : « qui va lancer le plus ? », « plus de 3 lancés ? », « over 2.5 tirs »,
-    « qui va marquer ? ». equipe : MTL, Canadiens, CH... (défaut MTL). stat : tirs, buts,
-    passes ou points. seuil : tel que dit (« plus de 3 », « 4+ », « over 2.5 »)."""
-    import asyncio
-    eq = _equipe(equipe or "MTL")
-    cle = _stat_tendance(stat)
-    # Seuil glissé dans la stat (« plus de 3 lancés ») : on le récupère
-    mini = _seuil(seuil if seuil not in (None, "") else (stat if re.search(r"\d|\b(un|deux|trois|quatre|cinq|six)\b", _norm(stat or "")) else None), cle)
-    n = 10
-    nom_stat = NOMS_STAT[cle]
+LIGUE = {"lnh", "nhl", "ligue", "toute la ligue", "tous", "toutes", "ce soir", "partout", "league", "all"}
 
+
+def _val_stat(g: dict, cle: str) -> int:
+    if cle == "points":
+        return (g.get("points") if g.get("points") is not None else (g.get("goals") or 0) + (g.get("assists") or 0)) or 0
+    return g.get(cle) or 0
+
+
+async def _lignes_equipe(eq: str, cle: str, mini: int, n: int = 10, preselection: int | None = None) -> tuple[list, list]:
+    """Taux de réussite récent de chaque patineur d'une équipe pour « cle >= mini ».
+    preselection : ne garder que les N meilleurs à la moyenne de la saison (mode ligue, moins d'appels)."""
+    import asyncio
     club = await _get(f"{API}/club-stats/{eq}/now")
     patineurs = [p for p in club.get("skaters", []) if (p.get("gamesPlayed") or 0) > 0]
+    if preselection:
+        champ = {"shots": "shots", "goals": "goals", "assists": "assists", "points": "points"}.get(cle, cle)
+        patineurs.sort(key=lambda p: (p.get(champ) or 0) / max(p.get("gamesPlayed") or 1, 1), reverse=True)
+        patineurs = patineurs[:preselection]
     logs = await asyncio.gather(*[_game_log(p["playerId"]) for p in patineurs])
 
-    # Dernier match joué par l'équipe : un joueur absent de ce match est probablement blessé ou retranché
     cal = await _get(f"{API}/club-schedule-season/{eq}/now")
     finis = [g for g in cal.get("games", []) if g.get("gameType") in (2, 3) and g.get("gameState") in ("OFF", "FINAL")]
     dernier_id = finis[-1]["id"] if finis else None
@@ -1485,47 +1486,97 @@ async def tendances_joueurs(equipe: str = "MTL", stat: str = "tirs", seuil: str 
     except httpx.HTTPError:
         blesses_eq = set()
 
-    def val(g):
-        if cle == "points":
-            return (g.get("points") if g.get("points") is not None else (g.get("goals") or 0) + (g.get("assists") or 0)) or 0
-        return g.get(cle) or 0
-
     lignes, absents = [], []
     for p, log in zip(patineurs, logs):
         nom = f'{_txt(p.get("firstName"))} {_txt(p.get("lastName"))}'.strip()
         recents = log[:n]  # l'API renvoie le plus récent d'abord
         if not recents:
             continue
-        reussis = sum(1 for g in recents if val(g) >= mini)
-        saison_reussis = sum(1 for g in log if val(g) >= mini)
+        reussis = sum(1 for g in recents if _val_stat(g, cle) >= mini)
+        saison_reussis = sum(1 for g in log if _val_stat(g, cle) >= mini)
         ligne = {
             "joueur": nom,
+            "equipe": eq,
             "pos": p.get("positionCode"),
             "reussi_recent": f"{reussis}/{len(recents)}",
             "pct_recent": round(100 * reussis / len(recents)),
             "pct_saison": round(100 * saison_reussis / len(log)),
-            "moyenne_recente": round(sum(val(g) for g in recents) / len(recents), 2),
-            "5_derniers": [val(g) for g in recents[:5]],
-            "toi_moyen": _mmss(p.get("avgTimeOnIcePerGame")),
+            "moyenne_recente": round(sum(_val_stat(g, cle) for g in recents) / len(recents), 2),
         }
         absent = _norm(nom) in blesses_eq or (dernier_id and recents[0].get("gameId") != dernier_id)
         (absents if absent else lignes).append(ligne)
+    return lignes, absents
 
-    lignes.sort(key=lambda l: (l["pct_recent"], l["moyenne_recente"], l["pct_saison"]), reverse=True)
+
+def _tri(l: dict):
+    return (l["pct_recent"], l["moyenne_recente"], l["pct_saison"])
+
+
+@mcp.tool(output_schema=None)
+@_outil_texte
+async def tendances_joueurs(equipe: str = "MTL", stat: str = "tirs", seuil: str = "") -> dict:
+    """QUI a le plus de chances d'atteindre X tirs (lancés), buts, passes ou points ce soir :
+    « qui va lancer le plus ? », « plus de 3 lancés ? », « over 2.5 tirs », « qui va marquer ? ».
+    equipe : une équipe (MTL, Canadiens, CH...) ou « LNH » pour TOUTE LA LIGUE (tous les matchs de ce
+    soir). Si l'utilisateur ne nomme pas d'équipe, ou dit « dans la ligue », « ce soir », mettre « LNH ».
+    stat : tirs, buts, passes ou points. seuil : tel que dit (« plus de 3 », « 3+ », « over 2.5 »)."""
+    import asyncio
+    cle = _stat_tendance(stat)
+    mini = _seuil(seuil if seuil not in (None, "") else (stat if re.search(r"\d|\b(un|deux|trois|quatre|cinq|six)\b", _norm(stat or "")) else None), cle)
+    nom_stat = NOMS_STAT[cle]
+    seuil_txt = f"{mini} {nom_stat if mini > 1 else nom_stat.rstrip('s')} ou plus"
+
+    # ----- Toute la ligue : seulement les équipes qui jouent ce soir -----
+    if not equipe or _norm(equipe) in LIGUE:
+        data = await _get(f"{API}/score/{_date(None)}")
+        matchs = [g for g in data.get("games", []) if g.get("gameState") in ("FUT", "PRE", "LIVE", "CRIT")]
+        if not matchs:
+            return {"reponse": "Aucun match de la LNH ce soir (ou ils sont tous terminés).", "seuil": seuil_txt}
+        adv = {}
+        for g in matchs:
+            h, a = g["homeTeam"]["abbrev"], g["awayTeam"]["abbrev"]
+            adv[h], adv[a] = a, h
+        sem = asyncio.Semaphore(6)
+
+        async def une(eq):
+            async with sem:
+                try:
+                    return await _lignes_equipe(eq, cle, mini, preselection=6)
+                except httpx.HTTPError:
+                    return [], []
+        res = await asyncio.gather(*[une(eq) for eq in adv])
+        lignes = sorted((l for r in res for l in r[0]), key=_tri, reverse=True)
+        if not lignes:
+            return {"reponse": "Pas assez de données pour les matchs de ce soir.", "seuil": seuil_txt}
+        top = lignes[:3]
+        morceaux = [f'{l["joueur"]} ({NOMS.get(l["equipe"], l["equipe"])} contre {adv[l["equipe"]]}, '
+                    f'{l["reussi_recent"]} derniers matchs, moyenne {l["moyenne_recente"]:g})' for l in top]
+        reponse = (f"Dans toute la LNH ce soir ({len(matchs)} matchs), {seuil_txt} : le plus probable est "
+                   + morceaux[0] + (", puis " + " et ".join(morceaux[1:]) if len(morceaux) > 1 else "") + ".")
+        return {
+            "reponse": reponse,
+            "seuil": seuil_txt,
+            "top5": [f'{l["joueur"]} ({l["equipe"]}) {l["reussi_recent"]} (moy. {l["moyenne_recente"]:g})' for l in lignes[:5]],
+            "fenetre": "10 derniers matchs, 6 meilleurs de chaque équipe qui joue ce soir",
+        }
+
+    # ----- Une équipe -----
+    eq = _equipe(equipe)
+    lignes, absents = await _lignes_equipe(eq, cle, mini)
+    lignes.sort(key=_tri, reverse=True)
 
     g = await _match_equipe(eq, None)
     if g:
-        adv = g["homeTeam"]["abbrev"] if g["awayTeam"]["abbrev"] == eq else g["awayTeam"]["abbrev"]
-        contexte = f"ce soir contre {adv}"
+        adv_eq = g["homeTeam"]["abbrev"] if g["awayTeam"]["abbrev"] == eq else g["awayTeam"]["abbrev"]
+        contexte = f"ce soir contre {adv_eq}"
     else:
-        adv, contexte = None, "(pas de match aujourd'hui)"
+        contexte = "ne joue pas ce soir (tendance pour son prochain match)"
 
-    seuil_txt = f"{mini} {nom_stat if mini > 1 else nom_stat.rstrip('s')} ou plus"
     if lignes:
         top = lignes[:3]
         morceaux = [f'{l["joueur"]} ({l["reussi_recent"]} derniers matchs, moyenne {l["moyenne_recente"]:g})'
                     for l in top]
-        reponse = (f"{eq} {contexte}, {seuil_txt} : le plus probable est " + morceaux[0]
+        reponse = (f"{NOMS.get(eq, eq)} {contexte}, {seuil_txt} : le plus probable est " + morceaux[0]
                    + (", puis " + " et ".join(morceaux[1:]) if len(morceaux) > 1 else "") + ".")
     else:
         reponse = f"Aucune donnée de match pour {eq} cette saison."
@@ -1537,7 +1588,7 @@ async def tendances_joueurs(equipe: str = "MTL", stat: str = "tirs", seuil: str 
         "reponse": reponse,
         "seuil": seuil_txt,
         "top5": [f'{l["joueur"]} {l["reussi_recent"]} (moy. {l["moyenne_recente"]:g})' for l in lignes[:5]],
-        "fenetre": f"{n} derniers matchs",
+        "fenetre": "10 derniers matchs",
     }
 
 
