@@ -1189,6 +1189,7 @@ def _saison_voulue(saison: str) -> str | None:
 
 HOF_URL = "https://records.nhl.com/site/api/hof/players"
 HOF_TTL = 86400
+_hof_diag = {"etat": "jamais lu"}
 
 
 async def _temple() -> dict[int, str]:
@@ -1199,9 +1200,12 @@ async def _temple() -> dict[int, str]:
     try:
         r = await _client.get(HOF_URL, follow_redirects=True)
         r.raise_for_status()
-        lignes = r.json().get("data", [])
-    except (httpx.HTTPError, ValueError):
+        corps = r.json()
+        lignes = corps.get("data", []) if isinstance(corps, dict) else corps
+    except (httpx.HTTPError, ValueError) as e:
+        _hof_diag.update(etat=f"erreur : {type(e).__name__} {str(e)[:150]}")
         return {}
+    _hof_diag.update(etat=f"{len(lignes)} lignes", exemple=lignes[0] if lignes else None)
     hof = {}
     for l in lignes:
         pid = l.get("playerId", l.get("player_id"))
@@ -1295,6 +1299,7 @@ async def carriere_joueur(nom: str, saison: str = "") -> dict:
     return {
         "reponse": reponse,
         "temple_renommee": temple,
+        "temple_source": dict(_hof_diag) if not date_hof else None,
         "equipe": d.get("currentTeamAbbrev"),
         "position": d.get("position"),
         "taille_cm": d.get("heightInCentimeters"),
