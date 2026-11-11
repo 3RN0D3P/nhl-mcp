@@ -413,10 +413,28 @@ async def stats_joueur(nom: str) -> dict:
     d = await _get(f"{API}/player/{j['id']}/landing")
     saison = (d.get("featuredStats") or {}).get("regularSeason", {}).get("subSeason", {})
     qui = f'{_txt(d.get("firstName"))} {_txt(d.get("lastName"))}'
-    if saison:
-        reponse = (f'{qui} ({d.get("currentTeamAbbrev")}), saison en cours : {saison.get("goals", 0)} buts, '
-                   f'{saison.get("assists", 0)} passes, {saison.get("points", 0)} points en '
-                   f'{saison.get("gamesPlayed", 0)} matchs ({saison.get("plusMinus", 0):+}).')
+    gardien = d.get("position") == "G"
+    auj = datetime.now(TZ).date()
+    debut = auj.year if auj.month >= 9 else auj.year - 1
+    en_cours = f"{debut}{debut + 1}"
+    saison_vue = str((d.get("featuredStats") or {}).get("season") or "")
+
+    def resume(st):
+        if gardien:
+            return (f'{st.get("gamesPlayed", 0)} matchs, {st.get("wins", 0)} victoires, '
+                    f'{(st.get("savePctg") or 0):.3f} d\'efficacité, moyenne {(st.get("goalsAgainstAvg") or 0):.2f}')
+        return (f'{st.get("goals", 0)} buts, {st.get("assists", 0)} passes, {st.get("points", 0)} points en '
+                f'{st.get("gamesPlayed", 0)} matchs ({st.get("plusMinus", 0):+})')
+
+    if saison and saison_vue == en_cours:
+        reponse = f'{qui} ({d.get("currentTeamAbbrev")}), saison en cours : {resume(saison)}.'
+    elif not d.get("isActive", True) or (saison_vue and saison_vue < en_cours):
+        statut = "est retraité" if not d.get("isActive", True) else "n'a pas joué dans la LNH cette saison"
+        reponse = f"{qui} {statut}."
+        if saison and saison_vue:
+            reponse += f" Sa dernière saison dans la LNH était {_saison_txt(saison_vue)} : {resume(saison)}."
+        reponse += " Pour sa carrière complète, utiliser carriere_joueur."
+        return {"reponse": reponse, "joueur": qui, "position": d.get("position")}
     else:
         reponse = f"{qui} n'a pas encore joué cette saison."
     return {
