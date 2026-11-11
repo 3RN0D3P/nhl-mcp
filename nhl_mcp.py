@@ -1192,8 +1192,9 @@ HOF_TTL = 86400
 _hof_diag = {"etat": "jamais lu"}
 
 
-async def _temple() -> dict[int, str]:
-    """Temple de la renommée du hockey (joueurs) : playerId LNH -> date d'intronisation (records.nhl.com)."""
+async def _temple() -> dict:
+    """Temple de la renommée du hockey (records.nhl.com) : {"ids": {playerId: date}, "noms": [(nom normalisé, date)]}.
+    Beaucoup de lignes n'ont pas de playerId : on garde aussi le nom (miscFullName) pour les retrouver."""
     hit = _cache.get(HOF_URL)
     if hit and time.time() - hit[0] < HOF_TTL:
         return hit[1]
@@ -1204,16 +1205,30 @@ async def _temple() -> dict[int, str]:
         lignes = corps.get("data", []) if isinstance(corps, dict) else corps
     except (httpx.HTTPError, ValueError) as e:
         _hof_diag.update(etat=f"erreur : {type(e).__name__} {str(e)[:150]}")
-        return {}
-    _hof_diag.update(etat=f"{len(lignes)} lignes", exemple=lignes[0] if lignes else None)
-    hof = {}
+        return {"ids": {}, "noms": []}
+    _hof_diag.update(etat=f"{len(lignes)} lignes")
+    ids, noms = {}, []
     for l in lignes:
-        pid = l.get("playerId", l.get("player_id"))
-        date = l.get("dateInducted", l.get("date_inducted"))
-        if pid:
-            hof[int(pid)] = str(date or "")
+        date = str(l.get("dateInducted") or "")
+        if l.get("playerId"):
+            ids[int(l["playerId"])] = date
+        nom = _norm(re.sub(r'"[^"]*"', " ", str(l.get("miscFullName") or "")))
+        if nom:
+            noms.append((nom, date))
+    hof = {"ids": ids, "noms": noms}
     _cache[HOF_URL] = (time.time(), hof)
     return hof
+
+
+def _date_temple(hof: dict, pid: int, prenom: str, nom: str) -> str | None:
+    if pid in hof["ids"]:
+        return hof["ids"][pid]
+    p, n = _norm(prenom), _norm(nom)
+    for complet, date in hof["noms"]:
+        mots = complet.split()
+        if n and n in mots and p and (p in mots or any(m.startswith(p[:3]) for m in mots)):
+            return date
+    return None
 
 
 @mcp.tool(output_schema=None)
@@ -1266,7 +1281,7 @@ async def carriere_joueur(nom: str, saison: str = "") -> dict:
         return " ; ".join(f"{nt} ({', '.join(sa)})" for nt, sa in par_nom.items())
     carriere = ((d.get("careerTotals") or {}).get("regularSeason") or {})
 
-    date_hof = (await _temple()).get(int(j["id"]))
+    date_hof = _date_temple(await _temple(), int(j["id"]), _txt(d.get("firstName")), _txt(d.get("lastName")))
     if date_hof:
         temple = f"Intronisé au Temple de la renommée du hockey en {date_hof[:4]}."
     elif d.get("inHHOF"):
@@ -1299,7 +1314,6 @@ async def carriere_joueur(nom: str, saison: str = "") -> dict:
     return {
         "reponse": reponse,
         "temple_renommee": temple,
-        "temple_source": dict(_hof_diag) if not date_hof else None,
         "equipe": d.get("currentTeamAbbrev"),
         "position": d.get("position"),
         "taille_cm": d.get("heightInCentimeters"),
