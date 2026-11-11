@@ -1212,9 +1212,12 @@ async def _temple() -> dict:
         date = str(l.get("dateInducted") or "")
         if l.get("playerId"):
             ids[int(l["playerId"])] = date
-        nom = _norm(re.sub(r'"[^"]*"', " ", str(l.get("miscFullName") or "")))
+        brut = str(l.get("miscFullName") or "")
+        nom = _norm(re.sub(r'"[^"]*"', " ", brut))
         if nom:
             noms.append((nom, date))
+    _hof_diag.update(dernieres=[(str(l.get("miscFullName")), str(l.get("dateInducted"))[:4], l.get("playerId"))
+                                for l in sorted(lignes, key=lambda x: str(x.get("dateInducted") or ""))[-6:]])
     hof = {"ids": ids, "noms": noms}
     _cache[HOF_URL] = (time.time(), hof)
     return hof
@@ -1314,6 +1317,7 @@ async def carriere_joueur(nom: str, saison: str = "") -> dict:
     return {
         "reponse": reponse,
         "temple_renommee": temple,
+        "temple_source": None if date_hof else {**_hof_diag, "proches": [c for c, _ in (await _temple())["noms"] if _norm(_txt(d.get("lastName"))) in c][:5]},
         "equipe": d.get("currentTeamAbbrev"),
         "position": d.get("position"),
         "taille_cm": d.get("heightInCentimeters"),
