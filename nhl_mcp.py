@@ -1187,12 +1187,38 @@ def _saison_voulue(saison: str) -> str | None:
     return f"{a}{a + 1}"
 
 
+HOF_URL = "https://records.nhl.com/site/api/hof/players"
+HOF_TTL = 86400
+
+
+async def _temple() -> dict[int, str]:
+    """Temple de la renommée du hockey (joueurs) : playerId LNH -> date d'intronisation (records.nhl.com)."""
+    hit = _cache.get(HOF_URL)
+    if hit and time.time() - hit[0] < HOF_TTL:
+        return hit[1]
+    try:
+        r = await _client.get(HOF_URL, follow_redirects=True)
+        r.raise_for_status()
+        lignes = r.json().get("data", [])
+    except (httpx.HTTPError, ValueError):
+        return {}
+    hof = {}
+    for l in lignes:
+        pid = l.get("playerId", l.get("player_id"))
+        date = l.get("dateInducted", l.get("date_inducted"))
+        if pid:
+            hof[int(pid)] = str(date or "")
+    _cache[HOF_URL] = (time.time(), hof)
+    return hof
+
+
 @mcp.tool(output_schema=None)
 @_outil_texte
 async def carriere_joueur(nom: str, saison: str = "") -> dict:
     """Âge, date et lieu de naissance, taille, poids, repêchage et stats de CARRIÈRE d'un joueur,
     avec ses stats saison par saison dans la LNH (toutes les années) et ses TROPHÉES (Hart, Art Ross,
-    Vézina, Calder, Conn Smythe...) de toutes les saisons. « Quel âge a X ? », « quels trophées a gagné X ? »,
+    Vézina, Calder, Conn Smythe...) de toutes les saisons, et s'il est au TEMPLE DE LA RENOMMÉE (HOF) avec
+    l'année d'intronisation. « Quel âge a X ? », « quels trophées a gagné X ? », « X est-il au Temple ? »,
     « combien de buts X a-t-il en carrière ? », « ses stats en 2018-19 ? » -> cet outil.
     saison : optionnelle (« 2018-19 », « 2018 ») pour une seule saison passée."""
     j = await _trouver_joueur(nom)
@@ -1236,6 +1262,14 @@ async def carriere_joueur(nom: str, saison: str = "") -> dict:
         return " ; ".join(f"{nt} ({', '.join(sa)})" for nt, sa in par_nom.items())
     carriere = ((d.get("careerTotals") or {}).get("regularSeason") or {})
 
+    date_hof = (await _temple()).get(int(j["id"]))
+    if date_hof:
+        temple = f"Intronisé au Temple de la renommée du hockey en {date_hof[:4]}."
+    elif d.get("inHHOF"):
+        temple = "Membre du Temple de la renommée du hockey."
+    else:
+        temple = "Pas (encore) au Temple de la renommée du hockey."
+
     voulue = _saison_voulue(saison) if saison else None
     if voulue:
         lignes = [s for s in lnh if str(s.get("season")) == voulue]
@@ -1256,9 +1290,11 @@ async def carriere_joueur(nom: str, saison: str = "") -> dict:
                f'{carriere.get("points", 0)} points en {carriere.get("gamesPlayed", 0)} matchs')
     reponse = (f"{qui}" + (f" a {age} ans (né le {d['birthDate']}" + (f" à {lieu}" if lieu else "") + ")" if age is not None else "")
                + f". En carrière dans la LNH : {tot}."
-               + (f" Trophées : {txt_trophees(trophees)}." if trophees else ""))
+               + (f" Trophées : {txt_trophees(trophees)}." if trophees else "")
+               + f" {temple}")
     return {
         "reponse": reponse,
+        "temple_renommee": temple,
         "equipe": d.get("currentTeamAbbrev"),
         "position": d.get("position"),
         "taille_cm": d.get("heightInCentimeters"),
