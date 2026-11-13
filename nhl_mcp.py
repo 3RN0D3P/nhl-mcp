@@ -429,7 +429,8 @@ async def stats_joueur(nom: str) -> dict:
     if saison and saison_vue == en_cours:
         reponse = f'{qui} ({d.get("currentTeamAbbrev")}), saison en cours : {resume(saison)}.'
     elif not d.get("isActive", True) or (saison_vue and saison_vue < en_cours):
-        statut = "est retraité" if not d.get("isActive", True) else "n'a pas joué dans la LNH cette saison"
+        statut = ("est retraité" if not d.get("isActive", True) else "n'a pas joué dans la LNH cette saison")
+        statut += f" (saison en cours : {_saison_txt(en_cours)})"
         reponse = f"{qui} {statut}."
         if saison and saison_vue:
             reponse += f" Sa dernière saison dans la LNH était {_saison_txt(saison_vue)} : {resume(saison)}."
@@ -1258,8 +1259,10 @@ async def _temple_wikidata(pid: int) -> str | None:
                                        "User-Agent": "nhl-mcp/1.0 (serveur MCP LNH perso)"})
         r.raise_for_status()
         res = r.json()["results"]["bindings"]
-    except (httpx.HTTPError, ValueError, KeyError):
+    except (httpx.HTTPError, ValueError, KeyError) as e:
+        _hof_diag["wikidata"] = f"erreur : {type(e).__name__} {str(e)[:150]}"
         return None
+    _hof_diag["wikidata"] = f"{len(res)} résultat(s) : {res[:1]}"
     date = (res[0].get("date") or {}).get("value", "") if res else None
     _cache[cle] = (time.time(), date)
     return date
@@ -1361,6 +1364,7 @@ async def carriere_joueur(nom: str, saison: str = "") -> dict:
     return {
         "reponse": reponse,
         "temple_renommee": temple,
+        "temple_source": None if (date_hof or not d.get("inHHOF")) else dict(_hof_diag),
         "equipe": d.get("currentTeamAbbrev"),
         "position": d.get("position"),
         "taille_cm": d.get("heightInCentimeters"),
