@@ -1234,11 +1234,35 @@ async def _temple() -> dict:
         nom = _norm(re.sub(r'"[^"]*"', " ", brut))
         if nom:
             noms.append((nom, date))
-    _hof_diag.update(dernieres=[(str(l.get("miscFullName")), str(l.get("dateInducted"))[:4], l.get("playerId"))
-                                for l in sorted(lignes, key=lambda x: str(x.get("dateInducted") or ""))[-6:]])
+
     hof = {"ids": ids, "noms": noms}
     _cache[HOF_URL] = (time.time(), hof)
     return hof
+
+
+WIKIDATA = "https://query.wikidata.org/sparql"
+
+
+async def _temple_wikidata(pid: int) -> str | None:
+    """Année d'intronisation au Temple via Wikidata (P3522 = identifiant NHL.com, P166 = distinction,
+    P585 = date). Sert quand la liste records.nhl.com n'est pas à jour (elle s'arrête en 2017)."""
+    cle = f"wd-hof:{pid}"
+    hit = _cache.get(cle)
+    if hit and time.time() - hit[0] < HOF_TTL:
+        return hit[1]
+    req = ('SELECT ?date WHERE { ?j wdt:P3522 "%d" . ?j p:P166 ?st . ?st ps:P166 ?prix . '
+           '?prix rdfs:label "Hockey Hall of Fame"@en . OPTIONAL { ?st pq:P585 ?date } } LIMIT 1') % pid
+    try:
+        r = await _client.get(WIKIDATA, params={"query": req, "format": "json"},
+                              headers={"Accept": "application/sparql-results+json",
+                                       "User-Agent": "nhl-mcp/1.0 (serveur MCP LNH perso)"})
+        r.raise_for_status()
+        res = r.json()["results"]["bindings"]
+    except (httpx.HTTPError, ValueError, KeyError):
+        return None
+    date = (res[0].get("date") or {}).get("value", "") if res else None
+    _cache[cle] = (time.time(), date)
+    return date
 
 
 def _date_temple(hof: dict, pid: int, prenom: str, nom: str) -> str | None:
@@ -1303,6 +1327,8 @@ async def carriere_joueur(nom: str, saison: str = "") -> dict:
     carriere = ((d.get("careerTotals") or {}).get("regularSeason") or {})
 
     date_hof = _date_temple(await _temple(), int(j["id"]), _txt(d.get("firstName")), _txt(d.get("lastName")))
+    if not date_hof and d.get("inHHOF"):
+        date_hof = await _temple_wikidata(int(j["id"]))
     if date_hof:
         temple = f"Intronisé au Temple de la renommée du hockey en {date_hof[:4]}."
     elif d.get("inHHOF"):
@@ -1335,7 +1361,6 @@ async def carriere_joueur(nom: str, saison: str = "") -> dict:
     return {
         "reponse": reponse,
         "temple_renommee": temple,
-        "temple_source": None if date_hof else {**_hof_diag, "proches": [c for c, _ in (await _temple())["noms"] if _norm(_txt(d.get("lastName"))) in c][:5]},
         "equipe": d.get("currentTeamAbbrev"),
         "position": d.get("position"),
         "taille_cm": d.get("heightInCentimeters"),
