@@ -1251,8 +1251,9 @@ async def _temple_wikidata(pid: int) -> str | None:
     hit = _cache.get(cle)
     if hit and time.time() - hit[0] < HOF_TTL:
         return hit[1]
-    req = ('SELECT ?date WHERE { ?j wdt:P3522 "%d" . ?j p:P166 ?st . ?st ps:P166 ?prix . '
-           '?prix rdfs:label "Hockey Hall of Fame"@en . OPTIONAL { ?st pq:P585 ?date } } LIMIT 1') % pid
+    req = ('SELECT ?prop ?date ?debut WHERE { ?j wdt:P3522 "%d" . ?j ?prop ?st . ?st ?ps ?cible . '
+           '?cible rdfs:label ?l . FILTER(LANG(?l) = "en" && CONTAINS(?l, "Hockey Hall of Fame")) '
+           'OPTIONAL { ?st pq:P585 ?date } OPTIONAL { ?st pq:P580 ?debut } } LIMIT 5') % pid
     try:
         r = await _client.get(WIKIDATA, params={"query": req, "format": "json"},
                               headers={"Accept": "application/sparql-results+json",
@@ -1263,15 +1264,37 @@ async def _temple_wikidata(pid: int) -> str | None:
         _hof_diag["wikidata"] = f"erreur : {type(e).__name__} {str(e)[:150]}"
         return None
     _hof_diag["wikidata"] = f"{len(res)} résultat(s) : {res[:1]}"
-    date = (res[0].get("date") or {}).get("value", "") if res else None
+    date = None
+    for b in res:
+        v = (b.get("date") or b.get("debut") or {}).get("value")
+        if v:
+            date = v
+            break
+    if res and not date:
+        date = ""
     _cache[cle] = (time.time(), date)
     return date
+
+
+# Intronisés récents (joueurs ayant joué dans la LNH) : la liste records.nhl.com s'arrête en 2017.
+# À compléter chaque année après l'annonce de juin.
+HOF_RECENTS = {
+    "martin brodeur": "2018", "martin st louis": "2018",
+    "guy carbonneau": "2019", "sergei zubov": "2019", "vaclav nedomansky": "2019",
+    "jarome iginla": "2020", "marian hossa": "2020", "kevin lowe": "2020",
+    "daniel alfredsson": "2022", "roberto luongo": "2022", "daniel sedin": "2022", "henrik sedin": "2022",
+    "henrik lundqvist": "2023", "tom barrasso": "2023", "pierre turgeon": "2023", "mike vernon": "2023",
+    "shea weber": "2024", "jeremy roenick": "2024", "pavel datsyuk": "2024",
+    "zdeno chara": "2025", "duncan keith": "2025", "joe thornton": "2025", "alexander mogilny": "2025",
+}
 
 
 def _date_temple(hof: dict, pid: int, prenom: str, nom: str) -> str | None:
     if pid in hof["ids"]:
         return hof["ids"][pid]
     p, n = _norm(prenom), _norm(nom)
+    if f"{p} {n}".replace("-", " ").replace(".", "") in HOF_RECENTS:
+        return HOF_RECENTS[f"{p} {n}".replace("-", " ").replace(".", "")]
     for complet, date in hof["noms"]:
         mots = complet.split()
         if n and n in mots and p and (p in mots or any(m.startswith(p[:3]) for m in mots)):
