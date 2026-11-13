@@ -1256,7 +1256,7 @@ async def _temple_wikidata(pid: int) -> str | None:
     try:
         r = await _client.get(WIKIDATA, params={"query": req, "format": "json"},
                               headers={"Accept": "application/sparql-results+json",
-                                       "User-Agent": "nhl-mcp/1.0 (serveur MCP LNH perso)"})
+                                       "User-Agent": "nhl-mcp/1.0 (https://github.com/3RN0D3P/nhl-mcp) httpx"})
         r.raise_for_status()
         res = r.json()["results"]["bindings"]
     except (httpx.HTTPError, ValueError, KeyError) as e:
